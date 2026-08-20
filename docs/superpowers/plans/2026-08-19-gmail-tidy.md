@@ -792,7 +792,7 @@ def test_first_matching_rule_wins():
     r2 = Rule(id="r2", match=MatchConfig(category="newsletters"), actions=Actions())
     cfg = Config(rules=[r1, r2])
     assert first_matching_rule(cfg, _meta(unread=True)) is r1
-    assert first_matching_rule(cfg, _meta(from_header="news@example.com")) is r2
+    assert first_matching_rule(cfg, _meta(from_header="newsletter@example.com")) is r2
     assert first_matching_rule(cfg, _meta(unread=False, from_header="boss@example.com")) is None
 ```
 
