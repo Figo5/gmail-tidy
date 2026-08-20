@@ -19,6 +19,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-cov>=5"]
 
+[project.scripts]
+gmail-tidy = "gmail_tidy.cli:app"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/gmail_tidy"]
 

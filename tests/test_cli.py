@@ -2,6 +2,9 @@
 get_credentials/build_service monkeypatched, so nothing touches a network, an
 OAuth browser flow, or real credentials."""
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -204,3 +207,24 @@ def test_auth_refresh_requests_write_scopes(tmp_path, monkeypatch):
     result = runner.invoke(app, ["auth", "refresh"])
     assert result.exit_code == 0
     assert seen["write"] is True
+
+
+def test_help_exit_zero_no_network(tmp_path, monkeypatch):
+    """`--help` renders without touching Gmail or reading user config."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))  # status() off real config
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    for command in ("init", "scan", "preview", "apply", "undo", "status"):
+        assert command in result.output
+
+
+def test_module_main_runs_help_offline():
+    """`python -m gmail_tidy --help` works without a package build or OAuth."""
+    env = dict(os.environ)
+    env.pop("GMAIL_TIDY_CONFIG", None)  # module --help must not read user config
+    result = subprocess.run(
+        [sys.executable, "-m", "gmail_tidy", "--help"],
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+    assert result.returncode == 0
+    assert "python -m gmail_tidy" in (result.stdout + result.stderr)
