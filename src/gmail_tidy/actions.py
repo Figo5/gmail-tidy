@@ -40,13 +40,15 @@ def noop_eliminate(meta: MessageMeta, actions: Actions) -> tuple[Actions, bool]:
 def scan(client: GmailClient, config: Config, limit: int | None = None) -> list[Candidate]:
     candidates: list[Candidate] = []
     seen: set[str] = set()
+    # One label index for the whole scan; scan never creates labels.
+    index = client.fetch_label_index()
     for rule in config.rules:
         ids = client.list(query_from_match(rule.match), limit=limit)
         for msg_id in ids:
             if msg_id in seen:
                 continue
             seen.add(msg_id)
-            meta = client.get_meta(msg_id)
+            meta = client.get_meta(msg_id, index)
             matched = first_matching_rule(config, meta)
             if matched is None or matched.id != rule.id:
                 continue  # another rule won, or message excluded/not included
@@ -70,10 +72,14 @@ def apply_run(client: GmailClient, config: Config, candidates: list[Candidate],
     """Re-verify every candidate against current state, then write. Returns exit code."""
     if not confirm():
         return EXIT_CANCELLED
+    # One label index for the whole run. Add labels are created here (the only
+    # write path that may create labels); remove labels that do not exist on
+    # the account are skipped.
+    index = client.fetch_label_index()
     failed = 0
     for cand in candidates:
         try:
-            meta = client.get_meta(cand.message_id)
+            meta = client.get_meta(cand.message_id, index)
         except Exception:
             journal.record_failure(run_id, cand.message_id, "message gone or unreadable")
             failed += 1
@@ -83,9 +89,25 @@ def apply_run(client: GmailClient, config: Config, candidates: list[Candidate],
         fresh, changed = noop_eliminate(meta, cand.actions)
         if not changed:
             continue
-        write_remove = list(fresh.remove_label) + (["INBOX"] if fresh.archive else [])
+        # Write boundary: resolve canonical names to Gmail label IDs.
+        add_ids: list[str] = []
+        for name in fresh.add_label:
+            label_id = client.ensure_label(name, index)  # create if missing
+            add_ids.append(label_id)
+        remove_ids: list[str] = []
+        for name in fresh.remove_label:
+            label_id = index.name_to_id(name)
+            if label_id is None:
+                continue  # label does not exist on the account; nothing to remove
+            remove_ids.append(label_id)
+        if fresh.archive:
+            inbox_id = index.name_to_id("INBOX")
+            if inbox_id is not None:
+                remove_ids.append(inbox_id)
+        if not add_ids and not remove_ids:
+            continue
         try:
-            client.batch_modify([meta.id], add=fresh.add_label, remove=write_remove)
+            client.batch_modify([meta.id], add=add_ids, remove=remove_ids)
         except Exception as exc:
             journal.record_failure(run_id, cand.message_id, str(exc))
             failed += 1

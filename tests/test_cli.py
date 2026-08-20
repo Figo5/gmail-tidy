@@ -71,8 +71,8 @@ def test_scan_and_preview_never_write(tmp_path, monkeypatch):
     result2 = runner.invoke(app, ["preview"])
     assert result2.exit_code == 0
     # mailbox unchanged after scan + preview
-    assert "Cleanup/N" not in api.store["m1"].label_ids
-    assert "INBOX" in api.store["m1"].label_ids
+    assert "Cleanup/N" not in api.label_names_of("m1")
+    assert "INBOX" in api.label_names_of("m1")
 
 
 def test_scan_noop_exits_3(tmp_path, monkeypatch):
@@ -115,8 +115,8 @@ def test_apply_executes_after_yes(tmp_path, monkeypatch):
     )
     result = runner.invoke(app, ["apply", "--run", run_id, "--yes"])
     assert result.exit_code == 0
-    assert "Cleanup/N" in api.store["m1"].label_ids
-    assert "INBOX" not in api.store["m1"].label_ids
+    assert "Cleanup/N" in api.label_names_of("m1")
+    assert "INBOX" not in api.label_names_of("m1")
 
 
 def test_apply_cancel_exits_5(tmp_path, monkeypatch):
@@ -134,7 +134,7 @@ def test_apply_cancel_exits_5(tmp_path, monkeypatch):
     # no --yes and stdin answers "n" to the confirm
     result = runner.invoke(app, ["apply", "--run", run_id], input="n\n")
     assert result.exit_code == 5
-    assert "Cleanup/N" not in api.store["m1"].label_ids
+    assert "Cleanup/N" not in api.label_names_of("m1")
 
 
 def test_undo_dry_run_by_default_no_writes(tmp_path, monkeypatch):
@@ -151,8 +151,8 @@ def test_undo_dry_run_by_default_no_writes(tmp_path, monkeypatch):
     )
     result = runner.invoke(app, ["undo", run_id])
     assert result.exit_code == 0
-    assert "Cleanup/N" in api.store["m1"].label_ids  # untouched (dry-run)
-    assert "INBOX" not in api.store["m1"].label_ids
+    assert "Cleanup/N" in api.label_names_of("m1")  # untouched (dry-run)
+    assert "INBOX" not in api.label_names_of("m1")
 
 
 def test_undo_executes_with_yes(tmp_path, monkeypatch):
@@ -169,8 +169,8 @@ def test_undo_executes_with_yes(tmp_path, monkeypatch):
     )
     result = runner.invoke(app, ["undo", run_id, "--yes"])
     assert result.exit_code == 0
-    assert "Cleanup/N" not in api.store["m1"].label_ids
-    assert "INBOX" in api.store["m1"].label_ids
+    assert "Cleanup/N" not in api.label_names_of("m1")
+    assert "INBOX" in api.label_names_of("m1")
 
 
 def test_undo_unknown_run_exits_2(tmp_path, monkeypatch):

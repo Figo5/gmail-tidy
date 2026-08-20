@@ -53,20 +53,32 @@ def execute_undo(client: GmailClient, plan: list[InverseAction], audit: AuditLog
                  run_id: str, confirm: Callable[[], bool]) -> int:
     if not confirm():
         return EXIT_CANCELLED
+    # One label index for the whole undo. Undo never creates labels: any name
+    # that cannot be resolved to an existing Gmail label ID is skipped.
+    index = client.fetch_label_index()
     for inv in plan:
-        meta = client.get_meta(inv.message_id)
+        meta = client.get_meta(inv.message_id, index)
         if set(meta.labels) != inv.expected_labels:
             continue  # user changed the message; never clobber
-        add = list(inv.add_label) + (["INBOX"] if inv.re_inbox else [])
-        remove = list(inv.remove_label)
-        if not add and not remove:
+        # Write boundary: resolve canonical names to Gmail label IDs.
+        add_ids: list[str] = []
+        for name in list(inv.add_label) + (["INBOX"] if inv.re_inbox else []):
+            label_id = index.name_to_id(name)
+            if label_id is not None:
+                add_ids.append(label_id)
+        remove_ids: list[str] = []
+        for name in inv.remove_label:
+            label_id = index.name_to_id(name)
+            if label_id is not None:
+                remove_ids.append(label_id)
+        if not add_ids and not remove_ids:
             continue
-        client.batch_modify([meta.id], add=add, remove=remove)
-        for label in add:
+        client.batch_modify([meta.id], add=add_ids, remove=remove_ids)
+        for label in list(inv.add_label) + (["INBOX"] if inv.re_inbox else []):
             audit.append(AuditEntry(run_id=run_id, message_id=meta.id, thread_id=meta.thread_id,
                                     rule_id=inv.rule_id, action="add_label", payload=label,
                                     kind="undo"))
-        for label in remove:
+        for label in inv.remove_label:
             audit.append(AuditEntry(run_id=run_id, message_id=meta.id, thread_id=meta.thread_id,
                                     rule_id=inv.rule_id, action="remove_label", payload=label,
                                     kind="undo"))

@@ -9,6 +9,7 @@ from __future__ import annotations
 import time
 
 from gmail_tidy.errors import AuthError, RequestError
+from gmail_tidy.labels import LabelIndex
 from gmail_tidy.rules import MessageMeta
 
 PAGE_SIZE = 100
@@ -63,22 +64,30 @@ class GmailClient:
             if not page_token:
                 return out
 
-    def get_meta(self, msg_id: str) -> MessageMeta:
+    def get_meta(self, msg_id: str, index: LabelIndex | None = None) -> MessageMeta:
         data = self._execute(
             self._svc.users().messages().get(userId="me", id=msg_id, format="metadata"),
             "get",
         )
         headers = {h["name"]: h["value"] for h in data.get("payload", {}).get("headers", [])}
+        label_ids = set(data.get("labelIds", []))
+        # Read boundary: convert Gmail label IDs to canonical names. Unknown
+        # IDs (labels created after the index was fetched) are kept raw so
+        # undo's exact-set safety never drops state.
+        if index is not None:
+            labels = {index.id_to_name(lid) or lid for lid in label_ids}
+        else:
+            labels = label_ids
         return MessageMeta(
             id=data["id"],
             thread_id=data.get("threadId", data["id"]),
-            labels=set(data.get("labelIds", [])),
+            labels=labels,
             internal_date_ms=int(data.get("internalDate", "0")),
             from_header=headers.get("From"),
             to_header=headers.get("To"),
             subject_header=headers.get("Subject"),
             size_kb=data.get("sizeEstimate", 0) / 1024.0,
-            unread="UNREAD" in data.get("labelIds", []),
+            unread="UNREAD" in label_ids,
         )
 
     def batch_modify(self, ids: list[str], add: list[str], remove: list[str]) -> None:
@@ -93,19 +102,25 @@ class GmailClient:
                 "batchModify",
             )
 
-    def list_label_names(self) -> list[str]:
+    def fetch_label_index(self) -> LabelIndex:
+        """Fetch the account's labels once and build a name <-> id index."""
         data = self._execute(self._svc.users().labels().list(userId="me"), "labels.list")
-        return [lbl["name"] for lbl in data.get("labels", [])]
+        return LabelIndex.from_labels(data.get("labels", []))
 
-    def ensure_label(self, name: str) -> str:
-        data = self._execute(self._svc.users().labels().list(userId="me"), "labels.list")
-        for lbl in data.get("labels", []):
-            if lbl["name"] == name:
-                return lbl["id"]
+    def ensure_label(self, name: str, index: LabelIndex) -> str:
+        """Resolve a label name to its Gmail ID, creating it if missing.
+
+        Only called from the apply write path. The index is updated in place
+        so subsequent resolutions in the same run see the new label.
+        """
+        label_id = index.name_to_id(name)
+        if label_id is not None:
+            return label_id
         created = self._execute(
             self._svc.users().labels().create(userId="me", body={"name": name}),
             "labels.create",
         )
+        index.add(name, created["id"])
         return created["id"]
 
     def profile_email(self) -> str:

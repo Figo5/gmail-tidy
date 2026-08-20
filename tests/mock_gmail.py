@@ -1,9 +1,21 @@
 # tests/mock_gmail.py
 """In-memory double for the Gmail API. Only the allowed surface exists:
 messages.list/get/batchModify, labels.list/get/create, users.getProfile.
-Any other callable raises AttributeError — a second safety gate behind the AST test."""
+Any other callable raises AttributeError — a second safety gate behind the AST test.
+
+The mock models REAL Gmail label semantics: message ``labelIds`` and
+``batchModify`` add/remove lists are **IDs** (opaque for user labels, identity
+for system labels like INBOX/UNREAD), while ``labels.list`` returns
+``{id, name}`` pairs. Setup helpers accept human-readable **names** and convert
+internally, so tests read naturally while the wire format stays faithful.
+"""
 
 from dataclasses import dataclass, field
+
+SYSTEM_LABELS = frozenset(
+    {"INBOX", "UNREAD", "STARRED", "IMPORTANT", "SPAM", "TRASH", "DRAFT",
+     "SENT", "CHAT"}
+)
 
 
 class _GError(Exception):
@@ -70,7 +82,9 @@ class _Users:
 class MockGmailApi:
     def __init__(self):
         self.store: dict[str, _Msg] = {}
-        self.labels: dict[str, str] = {}
+        # name -> id for user labels; system labels are implicit (id == name)
+        self._user_labels: dict[str, str] = {}
+        self._id_counter = 0
         self.fail_before = None
         self._handlers = {
             "list": self._list,
@@ -85,7 +99,7 @@ class MockGmailApi:
     def users(self):
         return _Users(self)
 
-    # --- setup helpers -------------------------------------------------
+    # --- setup helpers (accept NAMES, store IDs) ------------------------
     def add_message(self, msg_id: str, *, labels: set[str] | None = None,
                     size_kb: float = 0.0, subject: str = "",
                     from_hdr: str = "sender@example.com", to_hdr: str = "you@example.com",
@@ -93,7 +107,7 @@ class MockGmailApi:
         self.store[msg_id] = _Msg(
             id=msg_id,
             thread_id=f"t-{msg_id}",
-            label_ids=set(labels or {"INBOX"}),
+            label_ids={self.label_id(l) for l in (labels or {"INBOX"})},
             internal_date_ms=internal_date_ms,
             headers={"From": from_hdr, "To": to_hdr, "Subject": subject},
             size_kb=size_kb,
@@ -101,7 +115,37 @@ class MockGmailApi:
         )
         return msg_id
 
-    # --- handlers -----------------------------------------------------
+    def label_id(self, name: str) -> str:
+        """Gmail ID for a label name (system labels map to themselves)."""
+        if name in SYSTEM_LABELS:
+            return name
+        if name not in self._user_labels:
+            self._id_counter += 1
+            self._user_labels[name] = f"Label_{self._id_counter}"
+        return self._user_labels[name]
+
+    def has_label(self, name: str) -> bool:
+        """True if a user label exists on the account (never creates it)."""
+        return name in self._user_labels
+
+    def user_label_names(self) -> set[str]:
+        """Names of all user labels currently on the account."""
+        return set(self._user_labels)
+
+    def label_name(self, label_id: str) -> str:
+        """Name for a Gmail label ID (system labels map to themselves)."""
+        for name, lid in self._user_labels.items():
+            if lid == label_id:
+                return name
+        return label_id  # system label or unknown: id == name
+
+    def label_ids_of(self, msg_id: str) -> set[str]:
+        return set(self.store[msg_id].label_ids)
+
+    def label_names_of(self, msg_id: str) -> set[str]:
+        return {self.label_name(lid) for lid in self.store[msg_id].label_ids}
+
+    # --- handlers -------------------------------------------------------
     def _list(self, **kw):
         query = kw.get("q", "")
         page_token = kw.get("pageToken")
@@ -142,16 +186,18 @@ class MockGmailApi:
         return {"emailAddress": "you@example.com"}
 
     def _labels_list(self, **kw):
-        return {"labels": [{"id": v, "name": k} for k, v in self.labels.items()]}
+        labels = [{"id": name, "name": name} for name in SYSTEM_LABELS]
+        labels += [{"id": lid, "name": name} for name, lid in self._user_labels.items()]
+        return {"labels": labels}
 
     def _labels_get(self, **kw):
-        name = kw["id"]
-        return {"id": self.labels.get(name, name), "name": name}
+        label_id = kw["id"]
+        return {"id": label_id, "name": self.label_name(label_id)}
 
     def _labels_create(self, **kw):
         name = kw["body"]["name"]
-        self.labels[name] = name.replace("/", "_")
-        return {"id": self.labels[name], "name": name}
+        label_id = self.label_id(name)
+        return {"id": label_id, "name": name}
 
     def __getattr__(self, name):
         raise AttributeError(f"forbidden Gmail API method: {name}")
