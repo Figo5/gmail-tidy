@@ -6,6 +6,23 @@ build-backend = "hatchling.build"
 name = "gmail-tidy"
 version = "0.1.0"
 description = "Privacy-conscious declarative cleanup for existing Gmail mail — label + archive only."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+  { name = "gmail-tidy contributors" },
+]
+keywords = ["gmail", "email", "cleanup", "privacy", "cli", "labels", "archive"]
+classifiers = [
+  "Environment :: Console",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Communications :: Email",
+  "Topic :: Utilities",
+]
 requires-python = ">=3.11"
 dependencies = [
   "typer>=0.12",
