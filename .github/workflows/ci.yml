@@ -1,0 +1,26 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package
+        run: python -m pip install -e ".[dev]"
+      - name: Run offline test suite
+        # The unit suite is fully offline (MockGmailApi double). --live
+        # integration tests against the real Gmail API are excluded by default
+        # and are never part of CI or normal development.
+        run: python -m pytest -v
+      - name: Secret scan (no OAuth/credential files in tree)
+        run: |
+          if git ls-files | grep -Ei '(^|/)(token|client_secret).*\.json$'; then
+            echo "forbidden credential file in tree"; exit 1
+          fi
