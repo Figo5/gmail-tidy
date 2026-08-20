@@ -1462,18 +1462,19 @@ from gmail_tidy.rules import MessageMeta, first_matching_rule, is_excluded
 
 
 def query_from_match(match: MatchConfig) -> str:
-    """Best-effort Gmail search narrowing. Never the source of truth."""
+    """Best-effort Gmail search narrowing (bare terms). Never the source of truth.
+
+    Eligibility is always re-decided locally by first_matching_rule against
+    fetched metadata; this query only narrows what gets fetched. Bare terms
+    (no operator syntax) are used deliberately so narrowing degrades safely
+    to "fetch more, filter locally" rather than depending on exact operator
+    support from whatever is on the other end of GmailClient.list().
+    """
     parts: list[str] = []
+    parts.extend(match.subject_contains)
+    parts.extend(match.from_contains)
     if match.category:
-        parts.append(f"category:{match.category}")
-    for s in match.subject_contains:
-        parts.append(f'subject:"{s}"')
-    for s in match.from_contains:
-        parts.append(f'from:"{s}"')
-    if match.older_than_days:
-        parts.append(f"older_than:{match.older_than_days}d")
-    if match.unread is True:
-        parts.append("is:unread")
+        parts.append(match.category)
     return " ".join(parts)
 
 
@@ -1532,8 +1533,9 @@ def apply_run(client: GmailClient, config: Config, candidates: list[Candidate],
         fresh, changed = noop_eliminate(meta, cand.actions)
         if not changed:
             continue
+        write_remove = list(fresh.remove_label) + (["INBOX"] if fresh.archive else [])
         try:
-            client.batch_modify([meta.id], add=fresh.add_label, remove=fresh.remove_label)
+            client.batch_modify([meta.id], add=fresh.add_label, remove=write_remove)
         except Exception as exc:
             journal.record_failure(run_id, cand.message_id, str(exc))
             failed += 1
