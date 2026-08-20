@@ -39,6 +39,12 @@ dev = ["pytest>=8", "pytest-cov>=5"]
 [project.scripts]
 gmail-tidy = "gmail_tidy.cli:app"
 
+[project.urls]
+Homepage = "https://github.com/Figo5/gmail-tidy"
+Repository = "https://github.com/Figo5/gmail-tidy"
+Issues = "https://github.com/Figo5/gmail-tidy/issues"
+Documentation = "https://github.com/Figo5/gmail-tidy#readme"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/gmail_tidy"]
 

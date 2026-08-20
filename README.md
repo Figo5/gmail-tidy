@@ -8,9 +8,9 @@ age, read state) and the only actions are **add/remove labels** and **archive**
 gmail-tidy **never deletes, trashes, marks as spam, sends, or imports mail** — that
 surface is blocked by a precise AST-level test, not just convention.
 
-Status: **CI** — runs the offline suite on Python 3.11–3.14 (GitHub Actions, no live
-Gmail calls) · **Python** 3.11+ · **License** MIT. Badge URLs are added when this
-repo gets a public remote.
+[![CI](https://github.com/Figo5/gmail-tidy/actions/workflows/ci.yml/badge.svg)](https://github.com/Figo5/gmail-tidy/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://github.com/Figo5/gmail-tidy)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Figo5/gmail-tidy/blob/main/LICENSE)
 
 ## Why
 
