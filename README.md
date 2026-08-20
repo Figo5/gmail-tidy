@@ -133,10 +133,11 @@ python -m pytest
 ```
 
 The suite is **fully offline** — it uses an in-memory `MockGmailApi` double and an
-AST test proving no destructive Gmail method is callable. Optional `--live`
-integration tests against the real Gmail API live under `tests/live/` and are
-**disabled by default**; they are never part of normal development or CI. Always run
-the offline suite before committing:
+AST test proving no destructive Gmail method is callable. There is currently **no
+`--live` option and no live integration harness**: the suite contains no live tests
+and never calls Gmail. A future `--live` harness against the real Gmail API (under
+`tests/live/`) is **planned but not implemented**. Always run the offline suite
+before committing:
 
 - `python -m pytest -q` — all green
 - `git ls-files | grep -Ei '(^|/)(token|client_secret).*\.json$'` — no output

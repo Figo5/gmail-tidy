@@ -93,20 +93,22 @@ synthetic addresses** (`example.com`, `example.org`) — never real senders or r
 inbox content. Audit/run files are defined to exclude bodies, subjects, and
 senders; screenshots or animations in docs must use mock data labeled "synthetic".
 
-## Live integration tests (`--live`)
+## Live integration tests (`--live`) — planned
 
 Normal usage of every command **intentionally communicates with Gmail** — the
 commands are thin clients over the API, and "dry-run" means *no writes*, not *no
 network*. The offline unit suite, by contrast, makes **no network calls** at all.
 
-Optional `--live` integration tests under `tests/live/` exercise the real Gmail API
-against the user's own mailbox. They are:
+There is currently **no `--live` option and no live integration harness** in the
+suite. A future optional `--live` harness under `tests/live/` that would exercise the
+real Gmail API against the user's own mailbox is **planned but not implemented**. If
+added, it would be:
 
 - **disabled by default**, and never part of normal development or CI;
 - run only when explicitly requested, and only after the user has set up their own
   OAuth client (see [docs/google-cloud-setup.md](google-cloud-setup.md));
-- excluded by `tests/.live/` in `.gitignore`, so live artifacts and any real
-  credentials can never be committed.
+- excluded by `tests/live/` and `tests/.live/` in `.gitignore`, so live artifacts and
+  any real credentials could never be committed.
 
-Running `--live` tests with real credentials and real mail is an explicit, deliberate
-opt-in.
+Running `--live` tests with real credentials and real mail would remain an explicit,
+deliberate opt-in.

@@ -8,3 +8,4 @@ client_secret*.json
 token.json
 *.local
 tests/.live/
+tests/live/

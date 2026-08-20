@@ -69,7 +69,7 @@ keep it that way:
   patterns appear in the tree.
 - **Extend `.gitignore`** in your own forks/working copies for any additional secrets
   your environment produces. Never weaken the existing `client_secret*.json`,
-  `token.json`, or `tests/.live/` entries.
+  `token.json`, or `tests/live/` / `tests/.live/` entries.
 
 ## OAuth setup and scope hygiene
 
@@ -89,10 +89,12 @@ ships no client secret and no defaults. See
 - A `403` from Gmail (expired/revoked/insufficient scope) maps to a clear
   `gmail-tidy auth` message and exit 4.
 
-## Live integration tests (`--live`)
+## Live integration tests (`--live`) — planned
 
-Optional `--live` integration tests under `tests/live/` exercise the real Gmail API
-against the user's **own** mailbox. They are **disabled by default**, excluded from
-CI, and never part of normal development. The offline unit suite makes **no network
-calls**. Running `--live` tests with real credentials and real mail is an explicit,
-deliberate opt-in — never a default.
+There is currently **no `--live` option and no live integration harness**: the test
+suite is offline and makes **no network calls**. A future optional `--live` harness
+under `tests/live/` that would exercise the real Gmail API against the user's **own**
+mailbox is **planned but not implemented**. If added, it would be **disabled by
+default**, excluded from CI, and never part of normal development. Running `--live`
+tests with real credentials and real mail would remain an explicit, deliberate
+opt-in — never a default.

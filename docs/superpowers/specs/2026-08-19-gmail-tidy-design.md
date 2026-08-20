@@ -110,7 +110,7 @@ commented template; `account` is optional. Preset categories ship present but **
 by default** — a fresh install's `scan` changes nothing.
 
 ```yaml
-account: you@gmail.com
+account: you@example.com
 
 protect:
   include: []            # if non-empty, must match ≥1 to be eligible
