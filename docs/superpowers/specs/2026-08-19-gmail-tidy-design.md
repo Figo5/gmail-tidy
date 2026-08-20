@@ -43,6 +43,33 @@ providers. No mobile UI.
 - `apply` is the only command that mutates Gmail, and it re-verifies every batch
   immediately before writing.
 
+**OAuth scope model (amended):**
+
+- **Read-only commands** — `scan`, `preview`, `status`, and `auth status` — require only
+  the `gmail.readonly` scope. `init` establishes this scope. No write capability is held
+  during these commands, so a misbehaving run of `scan`/`preview` cannot mutate anything.
+- **Write commands** — `apply` and `undo` — require the escalated scope combination
+  `https://www.googleapis.com/auth/gmail.modify` (which permits `batchModify` label
+  changes, including adding/removing INBOX) **plus** `https://www.googleapis.com/auth/gmail.labels`
+  (label creation). `gmail.modify` alone is never sufficient to permanently delete,
+  trash, or send; those methods are additionally blocked by the API-surface test (§6.1).
+- **Scope escalation & reauthentication:** the token file records which scopes it was
+  minted with. When `apply` or `undo` runs and the stored token lacks the write scopes,
+  the CLI prompts the user, performs a **new interactive OAuth consent flow** (the
+  Google consent screen explicitly lists the broader scopes), and persists a new token
+  that supersedes the old one. `scan`/`preview` after an escalation continue to use the
+  (now broader) token — the token is a single credential, not per-command. A token
+  revoked at the Google end, or a `403` scope/expiry error, triggers re-consent with a
+  clear message ("run `gmail-tidy auth` to re-authenticate"), exit 4. Users who want
+  read-only-only usage can force a fresh read-only token with `gmail-tidy auth revoke`
+  then `init`.
+- **`auth revoke`:** deletes the local token file (`token.json` in the config dir,
+  `chmod 600`) after best-effort revocation via the token-info/revoke endpoint; if the
+  network call fails, the local file is still removed and the user is told the token
+  remains valid server-side until it expires. Safe to call at any time; subsequent
+  commands simply re-prompt for consent. `auth revoke` never deletes the config or
+  audit log.
+
 **Data flow:**
 
 ```
@@ -113,11 +140,34 @@ rules:
 
 **Actions:** `add_label[]`, `remove_label[]`, `archive` (bool).
 
+**`remove_label` behavior (precise):** `remove_label` removes only the explicitly
+listed label names from the message. **Protected labels are never removed or modified
+under any circumstance** — `protect.exclude` is a set of labels matched by
+`match_label`, and any message matching an exclude is already ineligible (§6.2). Beyond
+that, the system maintains a **never-touch label set** — `IMPORTANT`, `STARRED`,
+`SPAM`, `TRASH`, `DRAFT`, `SENT`, `CHAT`, and the top-level `Cleanup/…` labels created
+by this tool — that no `remove_label` (nor any other action) may act on. A rule that
+names a protected label in `remove_label` fails config validation at load time
+(exit 2, with the offending rule id), never at apply time. Because a message must first
+pass the include/exclude gate to appear in any plan, an excluded message can never be
+modified; the reconcile step before apply re-checks this (§6.2).
+
 ## 6. Safety invariants (test-enforced)
 
 1. The only Gmail write surface is `users.messages.batchModify` (label add/remove) and
-   label listing/creation. A greptest fails if `delete|trash|untrash|send|import` is
-   referenced anywhere in `src/`.
+   label listing/creation. Enforcement is a **precise AST / API-surface test**, not a
+   naive grep. `test_forbidden_api.py` parses every Python file in `src/` with `ast`,
+   walks all attribute-access chains, and fails only if the code references an actual
+   disallowed Gmail API resource/method pair — e.g. `messages().delete(...)`,
+   `messages().trash(...)`, `messages().untrash(...)`, `messages().send(...)`,
+   `messages().import_(...)`, `messages().batchDelete(...)`, or any `users().spam`,
+   `threads().delete(...)`, `users().stop`/`drafts().send` call. Plain words like
+   "delete" in docstrings, help text, error messages, variable names, or comments do
+   **not** trigger a failure; only a callable method on a Gmail API resource object
+   does. The test parses function calls and their `resource.method` receivers — a
+   local function named `delete()` or a string constant "trash" is ignored. The mock
+   (`MockGmailApi`) also exposes **only** the allowed surface, so any test that tries
+   to invoke a disallowed method fails fast at runtime.
 2. `exclude` is re-evaluated immediately before apply against then-current state; any
    message now excluded, or no longer existing, is skipped.
 3. No-op elimination: actions already true are dropped from the plan.
@@ -125,7 +175,19 @@ rules:
 5. Audit log (JSONL, `chmod 600`): `{ts, run_id, message_id, thread_id, rule_id, action,
    label}` — never sender/subject/body/size/content.
 6. Run files (candidates + checkpoints) are local, `chmod 600`, gitignored.
-7. `apply` requires interactive confirmation; `--yes` bypasses, and reprints the diff.
+7. `apply` requires full confirmation; `--yes` bypasses, and reprints the diff.
+
+8. **Allowed API surface is explicit (amended):** the complete, audited set of Gmail
+   API methods the code may call is `users.messages.list` (search/metadata),
+   `users.messages.get` (metadata only, `format=metadata`), `users.messages.batchModify`
+   (label add/remove — the sole write), `users.labels.list`, `users.labels.get`,
+   `users.labels.create`, and `users.getProfile` (for `status`/account). Anything else —
+   `messages.delete/trash/untrash/send/import/batchDelete`, `batchModify` invoked with
+   anything other than label add/remove ids, `drafts.*`, `threads.delete`,
+   `users.settings.*` — is disallowed by the API-surface test (§6.1).
+   `batchModify` accepts up to 1000 message ids per call and a `addLabelIds`/`removeLabelIds`
+   payload; batching never exceeds this (amended: architecture diagram and tests both
+   use the 1000 limit).
 
 ## 7. Failure behavior
 
@@ -183,7 +245,45 @@ previewed. Undo writes its own audit entries (run_id = original run, kind=undo).
 - Evaluator matrix, include/exclude precedence, no-op elimination, before/after diffs.
 - Pagination exhaustion, batch splitting at 1000, backoff/retry, error mapping.
 - Journal checkpoint/resume; undo reconstruction + idempotence.
+- **Undo safety test (amended):** a test mutates a message *after* the mock records the
+  run's "left-behind" state, then runs `undo`; the assertion is that the newer user
+  change (e.g. a label the user added, or a message the user re-archived) is **left
+  untouched and the message is skipped**, never overwritten by the inverse plan.
 - CLI exit-code table via `CliRunner`.
-- Greptest for forbidden methods.
-- Live testing: explicit `--live` flag only, never in CI, documented in
-  `docs/google-cloud-setup.md`.
+- **API-surface AST test** for forbidden Gmail methods (see §6.1; precisely scoped, not a
+  naive grep).
+- **`--live` is for optional integration testing only** (amended): the `--live` flag
+  gates a small, separately-invoked integration harness under `tests/live/` that
+  exercises the real Gmail API against the user's own mailbox. It is never part of the
+  normal `scan`/`preview`/`apply`/`undo` flow. Normal usage of every command
+  **intentionally communicates with Gmail** (they are thin clients over the API) —
+  "dry-run" in this project means *no writes*, not *no network*. The offline unit suite
+  and CI never make a network call; `--live` tests are excluded by default and run only
+  when explicitly requested.
+
+## 12. GitHub security guidance (public repo, amended)
+
+Published at `SECURITY.md` and `docs/safety-and-privacy.md`:
+
+- **Google Cloud OAuth setup:** users create their own OAuth Client ID in the Google
+  Cloud Console (Desktop app type), with scopes `gmail.readonly` for scan/preview and
+  `gmail.modify` + `gmail.labels` for apply/undo. The consent screen is "Internal" if
+  the project is personal, else "Testing" with test users; production users publish the
+  app and self-verify scopes. Step-by-step instructions live in `docs/google-cloud-setup.md`.
+- **Client secret files:** `client_secret.json` is downloaded by the user from the
+  console, placed in the config dir, never hardcoded, never committed, and matched in
+  `.gitignore`. The CLI never embeds or ships a default secret.
+- **Token storage:** OAuth tokens are stored in the config dir (`token.json`) with
+  `chmod 600` and never committed; on POSIX the config dir is `0700`; tokens are scoped,
+  refreshed, and revocable via `gmail-tidy auth revoke`.
+- **`.gitignore`:** the repo's `.gitignore` always contains `client_secret*.json`,
+  `token.json`, `*.local`, config dirs, and any generated OAuth/credential files, and a
+  `docs/` note tells contributors to extend it for their own secrets.
+- **Secret scanning:** enable GitHub secret scanning; never let generated OAuth files,
+  tokens, or API keys reach the repo. A CI check fails if `token.json`/`client_secret*.json`
+  patterns appear in the tree.
+- **No personal data in fixtures, logs, screenshots, or examples:** unit fixtures and
+  README/doc examples use only synthetic addresses (`example.com`, `example@example.org`),
+  never real senders or real inbox content; the audit log and run files are defined to
+  exclude bodies/subjects/senders (§6.5, §6.6); screenshots/animations in docs must use
+  mock data with a visible "synthetic" note.
