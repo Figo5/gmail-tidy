@@ -30,8 +30,11 @@ failure model, the undo contract, and the minimal-data policy. All invariants ar
    `chmod 600`, and gitignored.
 7. **Confirmation on writes.** `apply` prompts for confirmation (`Proceed with
    apply? [y/N]`, default No); `--yes` bypasses it. `undo` is **dry-run by default**
-   (with no flags it prints the inverse plan and exits `0`) and writes only with
-   `--yes` — there is no interactive prompt for `undo`.
+   (with no flags it prints the inverse plan and exits `0`); it writes only with
+   the new `--apply` flag — `--apply` alone prompts for confirmation
+   (`Proceed with undo?`, default No; decline prints `cancelled.` and exits `5`),
+   while `--apply --yes` skips the prompt for automation and never reads stdin.
+   `--yes` without `--apply` is a usage error (exit `2`), not a silent no-op.
 8. **Explicit, complete API surface.** The audited set is
    `users.messages.list/get/batchModify`, `users.labels.list/get/create`, and
    `users.getProfile`. Anything else — `messages.delete/trash/untrash/send/import/
@@ -69,8 +72,12 @@ equals the state the run left behind**.
 
 - Messages the user changed since the run are **skipped, never clobbered** — newer
   user state always wins.
-- `undo` is **dry-run by default**; use `--yes` to write. It is **idempotent**: a
-  second run finds the messages already restored and does nothing.
+- `undo` is **dry-run by default**; no flags (or `--dry-run`) prints the inverse
+  plan and exits `0`. A real write requires `--apply`: `--apply` alone prompts for
+  confirmation (decline cancels with exit `5`); `--apply --yes` writes immediately
+  with no prompt (never reads stdin, safe for automation). `--yes` without
+  `--apply` is a usage error (exit `2`). It is **idempotent**: a second run finds
+  the messages already restored and does nothing.
 - Undo writes its own audit entries with `kind: "undo"`, keyed to the original
   run_id.
 

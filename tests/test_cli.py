@@ -170,7 +170,8 @@ def test_undo_dry_run_by_default_no_writes(tmp_path, monkeypatch):
     assert "INBOX" not in api.label_names_of("m1")
 
 
-def test_undo_executes_with_yes(tmp_path, monkeypatch):
+def test_undo_executes_with_apply_yes(tmp_path, monkeypatch):
+    """--apply --yes writes immediately with no prompt (for automation)."""
     monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
     (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
     api = MockGmailApi()
@@ -182,10 +183,153 @@ def test_undo_executes_with_yes(tmp_path, monkeypatch):
                   actions=Actions(add_label=["Cleanup/N"], archive=True),
                   before_labels={"INBOX"}, in_inbox=True),
     )
-    result = runner.invoke(app, ["undo", run_id, "--yes"])
+    result = runner.invoke(app, ["undo", run_id, "--apply", "--yes"])
     assert result.exit_code == 0
     assert "Cleanup/N" not in api.label_names_of("m1")
     assert "INBOX" in api.label_names_of("m1")
+
+
+def test_undo_dry_run_flag_no_writes(tmp_path, monkeypatch):
+    """Explicit --dry-run is identical to no-flags: preview only, exit 0."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", labels={"Cleanup/N"})
+    _mock_net(monkeypatch, api)
+    run_id = _save_run(
+        tmp_path,
+        Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True),
+                  before_labels={"INBOX"}, in_inbox=True),
+    )
+    result = runner.invoke(app, ["undo", run_id, "--dry-run"])
+    assert result.exit_code == 0
+    assert "Cleanup/N" in api.label_names_of("m1")  # untouched (dry-run)
+    assert "INBOX" not in api.label_names_of("m1")
+
+
+def test_undo_yes_without_apply_is_usage_error(tmp_path, monkeypatch):
+    """--yes without --apply is a nonsensical combination → usage error, no write."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", labels={"Cleanup/N"})
+    _mock_net(monkeypatch, api)
+    run_id = _save_run(
+        tmp_path,
+        Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True),
+                  before_labels={"INBOX"}, in_inbox=True),
+    )
+    result = runner.invoke(app, ["undo", run_id, "--yes"])
+    assert result.exit_code == 2
+    assert "--yes" in result.output and "--apply" in result.output
+    assert "Cleanup/N" in api.label_names_of("m1")  # no write occurred
+    assert "INBOX" not in api.label_names_of("m1")
+
+
+def test_undo_apply_prompt_decline_cancels(tmp_path, monkeypatch):
+    """--apply alone prompts; declining prints 'cancelled.' and exits 5, no write."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", labels={"Cleanup/N"})
+    _mock_net(monkeypatch, api)
+    run_id = _save_run(
+        tmp_path,
+        Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True),
+                  before_labels={"INBOX"}, in_inbox=True),
+    )
+    result = runner.invoke(app, ["undo", run_id, "--apply"], input="n\n")
+    assert result.exit_code == 5
+    assert "cancelled." in result.output
+    assert "Cleanup/N" in api.label_names_of("m1")  # no write occurred
+    assert "INBOX" not in api.label_names_of("m1")
+
+
+def test_undo_apply_prompt_accept_writes(tmp_path, monkeypatch):
+    """--apply alone; accepting the prompt writes and exits 0."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", labels={"Cleanup/N"})
+    _mock_net(monkeypatch, api)
+    run_id = _save_run(
+        tmp_path,
+        Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True),
+                  before_labels={"INBOX"}, in_inbox=True),
+    )
+    result = runner.invoke(app, ["undo", run_id, "--apply"], input="y\n")
+    assert result.exit_code == 0
+    assert "Cleanup/N" not in api.label_names_of("m1")  # write happened
+    assert "INBOX" in api.label_names_of("m1")
+
+
+def test_undo_apply_yes_never_prompts(tmp_path, monkeypatch):
+    """--apply --yes must NEVER touch stdin (automation safety)."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", labels={"Cleanup/N"})
+    _mock_net(monkeypatch, api)
+    run_id = _save_run(
+        tmp_path,
+        Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True),
+                  before_labels={"INBOX"}, in_inbox=True),
+    )
+
+    def _fail_if_confirmed(prompt):
+        raise AssertionError("--apply --yes must never call typer.confirm (stdin read)")
+
+    monkeypatch.setattr(cli.typer, "confirm", _fail_if_confirmed)
+    # No `input=` provided at all — if code tried to read stdin this would hang/fail.
+    result = runner.invoke(app, ["undo", run_id, "--apply", "--yes"])
+    assert result.exit_code == 0
+    assert "Cleanup/N" not in api.label_names_of("m1")  # write happened
+    assert "INBOX" in api.label_names_of("m1")
+
+
+def test_undo_dry_run_wins_over_apply(tmp_path, monkeypatch):
+    """--dry-run --apply together: dry-run wins, preview only, no write."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", labels={"Cleanup/N"})
+    _mock_net(monkeypatch, api)
+    run_id = _save_run(
+        tmp_path,
+        Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True),
+                  before_labels={"INBOX"}, in_inbox=True),
+    )
+    result = runner.invoke(app, ["undo", run_id, "--dry-run", "--apply"])
+    assert result.exit_code == 0
+    assert "Cleanup/N" in api.label_names_of("m1")  # untouched (preview won)
+    assert "INBOX" not in api.label_names_of("m1")
+
+
+def test_undo_apply_yes_skips_user_changed_message(tmp_path, monkeypatch):
+    """CLI-level: exact-state guard still works through the --apply --yes path."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", labels={"Cleanup/N", "B"})  # user added B since apply
+    _mock_net(monkeypatch, api)
+    run_id = _save_run(
+        tmp_path,
+        Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True),
+                  before_labels={"INBOX"}, in_inbox=True),
+    )
+    result = runner.invoke(app, ["undo", run_id, "--apply", "--yes"])
+    assert result.exit_code == 0
+    # user label B untouched; INBOX NOT re-added (message was user-changed)
+    assert "B" in api.label_names_of("m1")
+    assert "INBOX" not in api.label_names_of("m1")
+    assert "Cleanup/N" in api.label_names_of("m1")
 
 
 def test_undo_unknown_run_exits_2(tmp_path, monkeypatch):

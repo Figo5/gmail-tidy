@@ -54,6 +54,15 @@ def _latest_run(journal: audit_mod.RunJournal) -> str | None:
     return runs[-1] if runs else None
 
 
+def _preview_undo(run_id: str, plan) -> None:
+    """Print the inverse plan (dry-run / preview path). Always exits EXIT_OK."""
+    console.print(f"inverse plan for run {run_id} (dry-run):")
+    for inv in plan:
+        console.print(f"  {inv.message_id}: +{inv.add_label} -{inv.remove_label} "
+                      f"inbox={inv.re_inbox}")
+    raise typer.Exit(EXIT_OK)
+
+
 def _exit_for(err: Exception) -> int:
     if isinstance(err, ConfigError):
         return EXIT_CONFIG
@@ -178,27 +187,48 @@ def apply(run_id: str | None = typer.Option(None, "--run"),
 
 @app.command()
 def undo(run_id: str,
+         apply_: bool = typer.Option(False, "--apply",
+                                     help="Signal real write-intent; see the gate below."),
          yes: bool = typer.Option(False, "--yes"),
          dry_run: bool = typer.Option(False, "--dry-run")):
-    """Reverse a run's actions; dry-run by default, idempotent."""
+    """Reverse a run's actions; dry-run by default, idempotent.
+
+    Behavior (precedence: dry_run > yes-without-apply usage error > default
+    preview > --apply prompt > --apply --yes write):
+
+    - no flags or --dry-run: print the inverse plan and exit 0 (never writes).
+    - --apply: print the plan, then prompt "Proceed with undo?"; on decline
+      print "cancelled." and exit 5, on accept write.
+    - --apply --yes: write immediately with no prompt (for automation); never
+      reads stdin.
+    - --yes WITHOUT --apply: usage error (exit 2) — a nonsensical combination,
+      rejected rather than silently ignored.
+    """
     try:
         cfg_dir = config_mod.config_dir()
         journal = audit_mod.RunJournal(cfg_dir / "runs")
         candidates = journal.load_candidates(run_id)
         plan = [inv for c in candidates for inv in build_undo_plan(c)]
-        if dry_run or not yes:
-            console.print(f"inverse plan for run {run_id} (dry-run):")
-            for inv in plan:
-                console.print(f"  {inv.message_id}: +{inv.add_label} -{inv.remove_label} "
-                              f"inbox={inv.re_inbox}")
-            raise typer.Exit(EXIT_OK)
-        client = _client(cfg_dir, require_write=True)
-        audit = audit_mod.AuditLog(cfg_dir / "audit.jsonl")
-        confirm = (lambda: True) if yes else (lambda: typer.confirm("Proceed with undo?"))
-        result = execute_undo(client, plan, audit, run_id, confirm)
-        if result == EXIT_CANCELLED:
-            console.print("cancelled.")
-        raise typer.Exit(result)
+        # Precedence per the gate contract:
+        #   (1) dry_run wins over everything (--dry-run --yes previews, never errors).
+        #   (2) --yes without --apply is a usage error, not a silent no-op.
+        #   (3) not apply_ (and not yes, handled by 2) → preview.
+        #   (4) apply_ and not yes → confirm-then-write.
+        #   (5) apply_ and yes → write immediately, never reading stdin.
+        if dry_run:
+            _preview_undo(run_id, plan)
+        elif not apply_ and yes:
+            raise ConfigError("--yes requires --apply")
+        elif not apply_:
+            _preview_undo(run_id, plan)
+        else:
+            client = _client(cfg_dir, require_write=True)
+            audit = audit_mod.AuditLog(cfg_dir / "audit.jsonl")
+            confirm = (lambda: True) if yes else (lambda: typer.confirm("Proceed with undo?"))
+            result = execute_undo(client, plan, audit, run_id, confirm)
+            if result == EXIT_CANCELLED:
+                console.print("cancelled.")
+            raise typer.Exit(result)
     except (ConfigError, AuthError) as e:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(_exit_for(e))

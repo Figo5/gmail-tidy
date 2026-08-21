@@ -121,11 +121,13 @@ mailbox.
    (`audit.jsonl` in the config dir) records every action it took.
 8. **Undo — dry-run by default, no flags needed.** `gmail-tidy undo <run_id>`
    **always** prints the inverse plan and exits `0` — that *is* the dry-run; you do
-   **not** need `--dry-run` to preview it. Only `gmail-tidy undo <run_id> --yes`
-   actually writes, and it does so **without any interactive prompt** (there is no
-   confirmation step for `undo`, unlike `apply`). Undo is idempotent and **skips
-   messages you changed since** the run (see
-   [docs/safety-and-privacy.md](docs/safety-and-privacy.md)).
+   **not** need `--dry-run` to preview it. A real write requires the **`--apply`**
+   flag: `gmail-tidy undo <run_id> --apply` prints the plan and then prompts for
+   confirmation (decline prints `cancelled.` and exits `5`), while
+   `gmail-tidy undo <run_id> --apply --yes` writes immediately with no prompt (for
+   automation; it never reads stdin). `--yes` **without** `--apply` is a usage
+   error (exit `2`). Undo is idempotent and **skips messages you changed since**
+   the run (see [docs/safety-and-privacy.md](docs/safety-and-privacy.md)).
 
 ## Scan semantics: `--limit`, pagination, and checkpoint progress
 
@@ -238,7 +240,7 @@ network.
 | `scan [--limit N] [--rules ID...]` | Build candidate plan → local run file; prints counts only. `--limit N` caps the plan at **N new eligible candidates** (not raw messages fetched). Pagination resumes from a saved checkpoint each run |
 | `preview [--run ID]` | Render a run's proposed actions (dry-run, no writes) |
 | `apply [--run ID] [--yes]` | Re-verify → confirm → execute in batches → journal → audit log |
-| `undo <run ID> [--yes]` | Reverse a run's actions from its before-state snapshot. **Dry-run by default** — with no flags it prints the inverse plan and exits `0`; `--yes` writes immediately with no prompt. Idempotent |
+| `undo <run ID> [--apply] [--yes]` | Reverse a run's actions from its before-state snapshot. **Dry-run by default** — with no flags it prints the inverse plan and exits `0`. A write requires `--apply`: `--apply` alone prompts for confirmation (decline exits `5`), `--apply --yes` writes immediately with no prompt. `--yes` without `--apply` is a usage error (exit 2). Idempotent |
 | `status` | Account, scopes held, last run, run history, audit-log path |
 | `auth status` / `auth refresh` / `auth revoke` | Inspect / escalate (read-only → `modify` + `labels`) / revoke tokens |
 
@@ -296,7 +298,8 @@ schtasks /Create /TN "gmail-tidy cleanup" /TR "powershell -ExecutionPolicy Bypas
   `schtasks` command) so a silent failure is visible.
 
 **Do not schedule `undo`.** `undo` is a manual safety-net operation (dry-run by
-default, `--yes` writes) — it is not something to automate.
+default; a real write requires `--apply`, and `--apply --yes` writes without a
+prompt) — it is not something to automate.
 
 ## Documentation
 
