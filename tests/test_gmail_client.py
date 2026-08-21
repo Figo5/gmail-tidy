@@ -19,6 +19,49 @@ def test_limit_respected():
     assert GmailClient(api).list(limit=3) == ["m0", "m1", "m2"]
 
 
+# --- list_page (single-page primitive) -----------------------------------
+
+
+def test_list_page_first_page_and_token():
+    api = MockGmailApi()
+    for i in range(5):
+        api.add_message(f"m{i}")
+    ids, tok = GmailClient(api).list_page()
+    assert ids == ["m0", "m1"]
+    assert tok is not None
+
+
+def test_list_page_second_page_via_token():
+    api = MockGmailApi()
+    for i in range(5):
+        api.add_message(f"m{i}")
+    client = GmailClient(api)
+    _, tok = client.list_page()
+    ids, tok2 = client.list_page(page_token=tok)
+    assert ids == ["m2", "m3"]
+    assert tok2 is not None
+
+
+def test_list_page_exhaustion_last_page():
+    api = MockGmailApi()
+    for i in range(5):
+        api.add_message(f"m{i}")
+    client = GmailClient(api)
+    _, tok = client.list_page()
+    _, tok = client.list_page(page_token=tok)
+    ids, tok = client.list_page(page_token=tok)
+    assert ids == ["m4"]
+    assert tok is None  # nextPageToken absent on the last page
+
+
+def test_list_page_honors_query():
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter")
+    api.add_message("m2", subject="receipt")
+    ids, _tok = GmailClient(api).list_page(query="newsletter")
+    assert ids == ["m1"]
+
+
 def test_batch_modify_calls_api():
     api = MockGmailApi()
     api.add_message("m1")

@@ -3,6 +3,14 @@ from pathlib import Path
 from gmail_tidy.config import Config, Rule, MatchConfig, Actions
 from gmail_tidy.actions import scan, apply_run
 from gmail_tidy.audit import RunJournal, AuditLog, Candidate
+from gmail_tidy.checkpoint import (
+    RuleCheckpoint,
+    ScanCheckpoint,
+    checkpoint_path,
+    config_fingerprint,
+    load_checkpoint,
+    save_checkpoint,
+)
 from gmail_tidy.gmail_client import GmailClient
 from gmail_tidy.errors import EXIT_OK, EXIT_CANCELLED
 from tests.mock_gmail import MockGmailApi
@@ -21,7 +29,7 @@ def test_scan_builds_candidates():
     api = MockGmailApi()
     api.add_message("m1", subject="newsletter", labels={"INBOX"})
     api.add_message("m2", subject="receipt", labels={"INBOX"})
-    c = scan(GmailClient(api), _config())
+    c, _cp = scan(GmailClient(api), _config())
     assert [x.message_id for x in c] == ["m1"]
     assert c[0].actions.add_label == ["Cleanup/N"]
     assert c[0].in_inbox is True
@@ -81,7 +89,7 @@ def test_apply_cancel_is_exit_5(tmp_path):
 def test_scan_never_creates_labels():
     api = MockGmailApi()
     api.add_message("m1", subject="newsletter", labels={"INBOX"})
-    scan(GmailClient(api), _config())
+    scan(GmailClient(api), _config())  # returns (candidates, checkpoint)
     # the add_label target must NOT exist after a scan
     assert not api.has_label("Cleanup/N")
     assert "Cleanup/N" not in api.label_names_of("m1")
@@ -197,3 +205,116 @@ def test_apply_audits_names_not_ids(tmp_path):
     assert "Cleanup/N" in payloads
     assert "INBOX" in payloads
     assert api.label_id("Cleanup/N") not in payloads
+
+
+# --- scan pagination / limit semantics (approved fix) --------------------
+
+
+def _multi_rule_config():
+    """Two rules, each narrowing on a distinct subject so candidates are
+    separated by rule. Order matters: r1 is tried first."""
+    return Config(
+        rules=[
+            Rule(id="r1", match=MatchConfig(subject_contains=["alpha"]),
+                 actions=Actions(add_label=["Cleanup/A"], archive=True)),
+            Rule(id="r2", match=MatchConfig(subject_contains=["beta"]),
+                 actions=Actions(add_label=["Cleanup/B"], archive=True)),
+        ]
+    )
+
+
+def test_scan_limit_is_global_across_rules():
+    """limit is a GLOBAL target across all rules, not per-rule."""
+    api = MockGmailApi()
+    for i in range(4):
+        api.add_message(f"a{i}", subject="alpha", labels={"INBOX"})
+    for i in range(4):
+        api.add_message(f"b{i}", subject="beta", labels={"INBOX"})
+    cfg = _multi_rule_config()
+    cands, cp = scan(GmailClient(api), cfg, limit=3)
+    assert len(cands) == 3
+    # all three candidates are eligible (not no-op), gathered across rules
+    assert {c.rule_id for c in cands} <= {"r1", "r2"}
+    # the limit was hit, so a resume point was persisted
+    assert cp.config_fingerprint == config_fingerprint(cfg)
+    assert cp.rules
+
+
+def test_scan_paginates_past_noop_messages_within_one_call():
+    """Pagination must continue past already-processed/no-op page-1 messages
+    and reach new eligible candidates on page 2, all in a single scan call."""
+    api = MockGmailApi()
+    # page 1 (2 messages): already labeled + archived -> no-op
+    api.add_message("m1", subject="newsletter", labels={"Cleanup/N"})
+    api.add_message("m2", subject="newsletter", labels={"Cleanup/N"})
+    # page 2: fresh, still eligible
+    api.add_message("m3", subject="newsletter", labels={"INBOX"})
+    api.add_message("m4", subject="newsletter", labels={"INBOX"})
+    cands, _cp = scan(GmailClient(api), _config())
+    assert [c.message_id for c in cands] == ["m3", "m4"]
+
+
+def test_scan_checkpoint_resumes_past_consumed_pages():
+    """(c) A scan that hits --limit mid-mailbox persists a page_token. Once
+    those candidates are applied (become no-op), a SECOND CLI-style invocation
+    seeded with the persisted checkpoint continues past the consumed pages and
+    finds the still-eligible messages beyond them, instead of re-fetching page 1
+    and returning empty."""
+    cfg = _config()
+    api = MockGmailApi()
+    for i in range(1, 7):
+        api.add_message(f"m{i}", subject="newsletter", labels={"INBOX"})
+    client = GmailClient(api)
+
+    # invoke 1: fresh scan, limit=4. Page size is 2, so it gathers m1..m4
+    # (pages 1-2) and stops mid-mailbox, persisting the page-2 resume token.
+    cands1, cp1 = scan(client, cfg, limit=4)
+    assert [c.message_id for c in cands1] == ["m1", "m2", "m3", "m4"]
+    assert cp1.rules["r1"].page_token is not None  # resume point persisted
+
+    # apply: mark the four candidates as already handled (label present, no
+    # longer in INBOX) so they are no-op on the next scan.
+    for c in cands1:
+        api.store[c.message_id].label_ids = {
+            api.label_id(l) for l in c.before_labels | set(c.actions.add_label)
+        } - {"INBOX"}
+
+    # invoke 2: fresh CLI-style invocation resumed from the persisted checkpoint
+    cands2, cp2 = scan(client, cfg, limit=10, checkpoint=cp1)
+    # found the beyond-page-2 messages that the first invocation never reached
+    assert [c.message_id for c in cands2] == ["m5", "m6"]
+    # mailbox fully consumed -> clean resume point
+    assert cp2.rules["r1"].page_token is None
+
+
+def test_scan_invalidated_checkpoint_restarts_from_page_1(tmp_path):
+    """(d) a stored checkpoint with a stale page_token is ignored when the
+    config changes (different fingerprint), so scanning restarts from page 1."""
+    cfg1 = _config()
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter", labels={"INBOX"})
+    api.add_message("m2", subject="newsletter", labels={"INBOX"})
+    api.add_message("m3", subject="newsletter", labels={"INBOX"})
+    client = GmailClient(api)
+
+    # config changes -> new fingerprint, so a stored checkpoint for cfg1 with a
+    # stale page_token is ignored and scanning restarts from page 1.
+    cfg2 = Config(
+        exclude=[MatchConfig(from_contains=["nonexistent"])],
+        rules=cfg1.rules,
+    )
+    assert config_fingerprint(cfg2) != config_fingerprint(cfg1)
+    # load via the checkpoint module to emulate cli behaviour; cfg1's checkpoint
+    # carries a different fingerprint so it is dropped on load for cfg2.
+    stale = ScanCheckpoint(
+        config_fingerprint=config_fingerprint(cfg1),
+        rules={"r1": RuleCheckpoint(page_token="99")},
+    )
+    p = checkpoint_path(tmp_path)
+    save_checkpoint(p, stale)
+    loaded = load_checkpoint(p, cfg2)
+    assert loaded.rules == {}  # invalidated -> no resume token
+    cands, _cp = scan(client, cfg2, checkpoint=loaded)
+    # restarts from page 1 and finds the page-1 candidate (m1) that a resume at
+    # the stale token ("99", i.e. past everything) would have skipped.
+    assert [c.message_id for c in cands] == ["m1", "m2", "m3"]

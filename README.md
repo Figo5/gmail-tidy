@@ -69,6 +69,35 @@ Requires Python 3.11+. The package uses `google-auth-oauthlib` +
    idempotent, and it **skips messages the user changed since** (see
    [docs/safety-and-privacy.md](docs/safety-and-privacy.md)).
 
+## Scan semantics: `--limit`, pagination, and checkpoint progress
+
+`gmail-tidy scan` is read-only and **resumes forward progress through your
+mailbox** across invocations:
+
+- **`--limit N` means "up to N *new eligible* candidates"**, not raw messages
+  fetched. Already-labeled / no-op / excluded messages do **not** count toward
+  `N`, so with several rules `scan --limit 500` returns at most 500 candidates
+  in total (across all rules), regardless of how many messages Gmail lists.
+- **Scan skips what's already done.** Messages that already carry the target
+  `Cleanup/*` label, are already archived, or are excluded are silently passed
+  over, and scanning continues deeper into the mailbox instead of stopping at
+  page 1.
+- **Progress is checkpointed.** Each scan records, per rule, the Gmail
+  `pageToken` it reached in `checkpoint.json` inside the config directory
+  (`~/.config/gmail-tidy/`, or `$GMAIL_TIDY_CONFIG`). Running `scan --limit N`
+  repeatedly makes forward progress through the mailbox — each run continues
+  past the already-processed pages instead of re-fetching them from the start —
+  until the mailbox is exhausted (after which scans find only genuinely new
+  mail).
+- **Editing `config.yaml` resets progress — that's expected, not a bug.** The
+  checkpoint is keyed to a hash of your rules and `protect.include`/`exclude`;
+  any edit invalidates it and the next scan restarts from page 1. This is
+  deliberate: a stale page token could otherwise silently skip messages under
+  the new rules.
+- **Safety is unchanged.** `scan` is fully read-only; only `apply`/`undo` write
+  to Gmail. The checkpoint file only records opaque Gmail pagination tokens and
+  rule ids — no message content or headers.
+
 ## Safety model
 
 - **Plan vs. play:** `scan`/`preview` never write. `apply` is the only write command
@@ -102,7 +131,7 @@ network.
 | Command | Behavior |
 |---|---|
 | `init` | Create config dir + commented template (presets disabled), start read-only OAuth |
-| `scan [--limit N] [--rules ID...]` | Build candidate plan → local run file; prints counts only |
+| `scan [--limit N] [--rules ID...]` | Build candidate plan → local run file; prints counts only. `--limit N` caps the plan at **N new eligible candidates** (not raw messages fetched). Pagination resumes from a saved checkpoint each run |
 | `preview [--run ID]` | Render a run's proposed actions (dry-run, no writes) |
 | `apply [--run ID] [--yes]` | Re-verify → confirm → execute in batches → journal → audit log |
 | `undo <run ID> [--dry-run] [--yes]` | Reverse a run's actions from its before-state snapshot; idempotent |

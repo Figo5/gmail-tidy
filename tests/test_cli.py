@@ -85,6 +85,21 @@ def test_scan_noop_exits_3(tmp_path, monkeypatch):
     assert result.exit_code == 3
 
 
+def test_scan_noop_still_writes_run_and_checkpoint(tmp_path, monkeypatch):
+    """A 0-candidate scan must still create a run file (so preview does not go
+    stale) and persist a checkpoint so the next scan advances past the page."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", subject="receipt", labels={"INBOX"})  # no rule matches
+    _mock_net(monkeypatch, api)
+    assert RunJournal(tmp_path / "runs").list_runs() == []
+    result = runner.invoke(app, ["scan"])
+    assert result.exit_code == 3  # no candidates
+    assert len(RunJournal(tmp_path / "runs").list_runs()) == 1  # run still created
+    assert (tmp_path / "checkpoint.json").exists()  # checkpoint persisted
+
+
 def test_missing_config_exits_2(tmp_path, monkeypatch):
     monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
     result = runner.invoke(app, ["scan"])

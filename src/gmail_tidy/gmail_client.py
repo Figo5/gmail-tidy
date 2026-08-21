@@ -64,6 +64,22 @@ class GmailClient:
             if not page_token:
                 return out
 
+    def list_page(self, query: str = "", page_token: str | None = None) -> tuple[list[str], str | None]:
+        """Fetch a single messages.list page.
+
+        Returns (message_ids, next_page_token). next_page_token is None on the
+        last page. Used by scan to paginate rule-by-rule and persist resume
+        points between invocations.
+        """
+        params = {"userId": "me", "maxResults": self._page_size}
+        if query:
+            params["q"] = query
+        if page_token:
+            params["pageToken"] = page_token
+        data = self._execute(self._svc.users().messages().list(**params), "list")
+        ids = [m["id"] for m in data.get("messages", [])]
+        return ids, data.get("nextPageToken")
+
     def get_meta(self, msg_id: str, index: LabelIndex | None = None) -> MessageMeta:
         data = self._execute(
             self._svc.users().messages().get(userId="me", id=msg_id, format="metadata"),

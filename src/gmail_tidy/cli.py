@@ -16,6 +16,7 @@ from gmail_tidy import audit as audit_mod
 from gmail_tidy import auth as auth_mod
 from gmail_tidy import config as config_mod
 from gmail_tidy.actions import apply_run, scan as build_scan  # alias: command named scan below
+from gmail_tidy.checkpoint import checkpoint_path, load_checkpoint, save_checkpoint
 from gmail_tidy.errors import (
     AuthError, ConfigError, NoWorkError,
     EXIT_OK, EXIT_RUNTIME, EXIT_CONFIG, EXIT_NOOP, EXIT_AUTH, EXIT_CANCELLED,
@@ -92,13 +93,22 @@ def scan(limit: int | None = typer.Option(None, "--limit"),
         if rules:
             cfg.rules = [r for r in cfg.rules if r.id in rules]
         client = _client(cfg_dir, require_write=False)
-        candidates = build_scan(client, cfg, limit=limit)
-        if not candidates:
-            console.print("nothing matched the configured rules.")
-            raise typer.Exit(EXIT_NOOP)
+        # Load the persisted pagination checkpoint so this scan resumes where
+        # the last one left off instead of restarting at page 1.
+        cp_path = checkpoint_path(cfg_dir)
+        cp = load_checkpoint(cp_path, cfg)
+        candidates, new_cp = build_scan(client, cfg, limit=limit, checkpoint=cp)
+        # Always persist the new checkpoint — even with 0 candidates — so the
+        # NEXT invocation continues past an empty page instead of re-fetching it.
+        save_checkpoint(cp_path, new_cp)
+        # Always create a run file, even for 0 candidates, so preview's
+        # _latest_run() never falls back to a stale already-applied run.
         journal = audit_mod.RunJournal(cfg_dir / "runs")
         run_id = journal.init_run()
         journal.save_candidates(run_id, candidates)
+        if not candidates:
+            console.print("nothing matched the configured rules.")
+            raise typer.Exit(EXIT_NOOP)
         console.print(f"[green]scan complete[/green]: {len(candidates)} candidate(s) — run {run_id}")
         raise typer.Exit(EXIT_OK)
     except (ConfigError, AuthError, NoWorkError) as e:

@@ -67,6 +67,25 @@ fetched metadata.
 > `from_contains`/`labels_have`). Both spellings work; a config may not use both for
 > the same block.
 
+## Scan pagination and the checkpoint
+
+`gmail-tidy scan --limit N` caps the plan at **N new eligible candidates** across
+all rules (not raw messages fetched, and not per rule). Already-labeled,
+already-archived, and excluded messages are skipped, and scanning continues past
+them deeper into the mailbox.
+
+Scan progress is persisted per rule to `checkpoint.json` in the config directory
+(`~/.config/gmail-tidy/`, or `$GMAIL_TIDY_CONFIG`). It stores only opaque Gmail
+`pageToken` values and rule ids — never message content. Running `scan --limit N`
+repeatedly resumes where the previous scan left off, so it makes forward progress
+through the mailbox until it's exhausted.
+
+**The checkpoint is invalidated whenever `config.yaml` changes.** `scan` hashes
+your rules and `protect.include`/`exclude`; if the hash differs from the stored
+one, the checkpoint is discarded and the next scan restarts from page 1. This is
+deliberate and safe: a stale page token under new rules could silently skip
+messages. Editing config and re-scanning is always safe (scan is read-only).
+
 ## `actions` keys
 
 | Key | Type | Meaning |

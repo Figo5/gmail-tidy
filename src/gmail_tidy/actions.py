@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from gmail_tidy.audit import AuditEntry, AuditLog, Candidate, RunJournal
+from gmail_tidy.checkpoint import RuleCheckpoint, ScanCheckpoint, config_fingerprint
 from gmail_tidy.config import Actions, Config, MatchConfig
 from gmail_tidy.errors import EXIT_CANCELLED, EXIT_OK, EXIT_PARTIAL
 from gmail_tidy.gmail_client import GmailClient
@@ -37,33 +38,68 @@ def noop_eliminate(meta: MessageMeta, actions: Actions) -> tuple[Actions, bool]:
     return Actions(add_label=add, remove_label=remove, archive=archive), changed
 
 
-def scan(client: GmailClient, config: Config, limit: int | None = None) -> list[Candidate]:
+def scan(client: GmailClient, config: Config, limit: int | None = None,
+         checkpoint: ScanCheckpoint | None = None) -> tuple[list[Candidate], ScanCheckpoint]:
+    """Build the candidate plan, paginating rule-by-rule with resumable state.
+
+    ``limit`` is a GLOBAL target for total NEW eligible candidates across all
+    rules — not a per-rule fetch cap and not a raw number of messages fetched.
+    Already-labeled/no-op/excluded messages do not count toward the limit.
+
+    Pagination resumes from ``checkpoint.rules[rule.id].page_token`` if present,
+    so a repeat scan makes forward progress through the mailbox instead of
+    re-fetching page 1. The returned ScanCheckpoint records, for every rule, the
+    resume point to continue from on the next invocation. When the limit is hit,
+    the CURRENT page's token (the one that produced the limit-hitting candidate)
+    is persisted so the next scan re-fetches that same page from the start rather
+    than skipping as-yet-unevaluated messages in it.
+
+    Scan remains fully read-only: it never calls GmailClient.list() here, only
+    list_page() (a single-page fetch), and never modifies any message.
+    """
     candidates: list[Candidate] = []
     seen: set[str] = set()
+    new_cp = ScanCheckpoint(config_fingerprint=config_fingerprint(config))
     # One label index for the whole scan; scan never creates labels.
     index = client.fetch_label_index()
     for rule in config.rules:
-        ids = client.list(query_from_match(rule.match), limit=limit)
-        for msg_id in ids:
-            if msg_id in seen:
-                continue
-            seen.add(msg_id)
-            meta = client.get_meta(msg_id, index)
-            matched = first_matching_rule(config, meta)
-            if matched is None or matched.id != rule.id:
-                continue  # another rule won, or message excluded/not included
-            actions, changed = noop_eliminate(meta, rule.actions)
-            if not changed:
-                continue
-            candidates.append(Candidate(
-                message_id=meta.id,
-                thread_id=meta.thread_id,
-                rule_id=rule.id,
-                actions=actions,
-                before_labels=set(meta.labels),
-                in_inbox="INBOX" in meta.labels,
-            ))
-    return candidates
+        tok = None
+        if checkpoint is not None and rule.id in checkpoint.rules:
+            tok = checkpoint.rules[rule.id].page_token
+        while True:
+            page_ids, next_tok = client.list_page(query_from_match(rule.match), page_token=tok)
+            for msg_id in page_ids:
+                if msg_id in seen:
+                    continue
+                seen.add(msg_id)
+                meta = client.get_meta(msg_id, index)
+                matched = first_matching_rule(config, meta)
+                if matched is None or matched.id != rule.id:
+                    continue  # another rule won, or message excluded/not included
+                actions, changed = noop_eliminate(meta, rule.actions)
+                if not changed:
+                    continue
+                candidates.append(Candidate(
+                    message_id=meta.id,
+                    thread_id=meta.thread_id,
+                    rule_id=rule.id,
+                    actions=actions,
+                    before_labels=set(meta.labels),
+                    in_inbox="INBOX" in meta.labels,
+                ))
+                if limit is not None and len(candidates) >= limit:
+                    # Persist the CURRENT page's token (the one that produced the
+                    # limit-hitting candidate), not next_tok, so the next scan
+                    # re-evaluates this same page from the start.
+                    new_cp.rules[rule.id] = RuleCheckpoint(page_token=tok)
+                    return candidates, new_cp
+            if next_tok is None:
+                # Mailbox exhausted for this rule/query; record a clean resume
+                # point (page_token=None) and move to the next rule.
+                new_cp.rules[rule.id] = RuleCheckpoint(page_token=None)
+                break
+            tok = next_tok
+    return candidates, new_cp
 
 
 def apply_run(client: GmailClient, config: Config, candidates: list[Candidate],
