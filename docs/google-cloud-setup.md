@@ -53,12 +53,27 @@ In **APIs & Services → OAuth consent screen**:
 
 Place the downloaded file in the config dir **exactly** as `client_secret.json`:
 
+**POSIX (macOS/Linux):**
+
 ```bash
 mkdir -p ~/.config/gmail-tidy
 cp ~/Downloads/client_secret_....apps.googleusercontent.com.json \
    ~/.config/gmail-tidy/client_secret.json
 chmod 600 ~/.config/gmail-tidy/client_secret.json
 ```
+
+**Windows (PowerShell):**
+
+```powershell
+New-Item -ItemType Directory -Force -Path "$HOME\.config\gmail-tidy"
+Copy-Item "$HOME\Downloads\client_secret_....apps.googleusercontent.com.json" `
+   "$HOME\.config\gmail-tidy\client_secret.json"
+```
+
+On Windows the config dir resolves to `C:\Users\<you>\.config\gmail-tidy`. There is
+**no `chmod` step on Windows** — file-permission restriction (`0700` dir / `0600`
+token) is a POSIX-only feature of this tool, and gmail-tidy skips it when
+`os.name == "nt"`. That is expected; nothing needs to be done about it on Windows.
 
 The config dir is `~/.config/gmail-tidy/` (override with the `GMAIL_TIDY_CONFIG`
 environment variable). On POSIX, gmail-tidy sets the dir to `0700` and the token to
@@ -84,6 +99,26 @@ Verify with:
 ```bash
 gmail-tidy auth status
 ```
+
+## Troubleshooting the local OAuth callback
+
+The CLI uses `flow.run_local_server(port=0, prompt="consent")` — `port=0` means an
+OS-assigned random free port, so a "port in use" error is **not** a realistic
+failure. The real gotchas, especially on Windows:
+
+- **Windows Firewall "allow this app" popup.** The first time the local server
+  starts, Windows Firewall may show a prompt asking whether to allow the app to
+  communicate. You **must click Allow** (at least for private networks) or the
+  callback never reaches the local server and the flow stalls.
+- **The default browser may not auto-launch.** If no browser window opens, the CLI
+  prints a URL — **copy it into your browser manually** and complete the consent
+  there. The flow then redirects back to the local callback.
+- **`Error 400: redirect_uri_mismatch`.** This happens specifically when the OAuth
+  client was created as the **wrong application type**. The client **must** be
+  created as **Desktop app** (see step 3 above), **not** "Web application". A Web
+  application client has no registered local redirect URI, so the callback is
+  rejected. Recreate the client as a Desktop app and download the new
+  `client_secret.json`.
 
 ## Scope behavior
 

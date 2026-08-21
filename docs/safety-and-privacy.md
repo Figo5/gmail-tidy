@@ -28,8 +28,10 @@ failure model, the undo contract, and the minimal-data policy. All invariants ar
    sender/subject/body/size/content. This is asserted by a test.
 6. **Local, private run files.** Run files (candidates + checkpoints) are local,
    `chmod 600`, and gitignored.
-7. **Confirmation on writes.** `apply` and `undo` require full confirmation;
-   `--yes` bypasses it.
+7. **Confirmation on writes.** `apply` prompts for confirmation (`Proceed with
+   apply? [y/N]`, default No); `--yes` bypasses it. `undo` is **dry-run by default**
+   (with no flags it prints the inverse plan and exits `0`) and writes only with
+   `--yes` — there is no interactive prompt for `undo`.
 8. **Explicit, complete API surface.** The audited set is
    `users.messages.list/get/batchModify`, `users.labels.list/get/create`, and
    `users.getProfile`. Anything else — `messages.delete/trash/untrash/send/import/

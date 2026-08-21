@@ -12,6 +12,11 @@ surface is blocked by a precise AST-level test, not just convention.
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://github.com/Figo5/gmail-tidy)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Figo5/gmail-tidy/blob/main/LICENSE)
 
+> **Install from GitHub source only.** gmail-tidy is **not yet published to PyPI** —
+> `pip install gmail-tidy` will **not** work (it fails with "No matching distribution
+> found"). Install from a local clone of this repository as described in
+> [Install](#install).
+
 ## Why
 
 Most mail-cleanup tools either only apply filters to *future* mail, or are
@@ -26,15 +31,48 @@ delete-first utilities. gmail-tidy combines three things no v1 competitor does:
 
 ## Install
 
-```bash
-python -m pip install gmail-tidy
-```
-
-Requires Python 3.11+. The package uses `google-auth-oauthlib` +
+gmail-tidy is installed **from source** (a local clone of this repository) — it is
+not on PyPI. Requires Python **3.11+**. The package uses `google-auth-oauthlib` +
 `google-api-python-client` for OAuth2, `typer`/`rich` for the CLI, and
 `pydantic`/`PyYAML` for config validation.
 
-## Quick start
+### Windows (PowerShell)
+
+These steps assume you already have a clone of this repository on disk — just `cd`
+into it. (If you don't have one yet, clone it first, then run the rest.)
+
+```powershell
+# 1. cd into your existing clone
+cd C:\path\to\gmail-tidy
+
+# 2. Create a virtual environment with the Python launcher.
+#    `py -0p` lists the Python versions you have installed; any 3.11+ works.
+py -3.11 -m venv .venv
+
+# 3. Activate the venv (PowerShell).
+.\.venv\Scripts\Activate.ps1
+#    If activation is blocked by the execution policy, run this once for the
+#    current shell, then re-run the Activate.ps1 line above:
+#    Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+
+# 4. Install. Use the editable + dev extras form for development:
+pip install -e ".[dev]"
+#    ...or the plain editable install if you only want to run it:
+#    pip install -e .
+
+# 5. Verify.
+gmail-tidy --help
+#    (or, without installing: python -m gmail_tidy --help)
+```
+
+> **POSIX (macOS/Linux):** the same flow works with `python3 -m venv .venv`,
+> `source .venv/bin/activate`, and `pip install -e ".[dev]"`.
+
+## Quick start — first safe workflow
+
+Work through these in order. The example below uses **label-only rules** (add a
+label, archive) — no destructive actions — so it is safe to run against a real
+mailbox.
 
 1. **Cloud setup:** create your own Google Cloud OAuth client per
    [docs/google-cloud-setup.md](docs/google-cloud-setup.md) and download
@@ -59,14 +97,34 @@ Requires Python 3.11+. The package uses `google-auth-oauthlib` +
          archive: true
    ```
 4. **Scan:** `gmail-tidy scan` builds a candidate plan (read-only) and writes a local
-   run file.
+   run file. If nothing matches, it prints `nothing matched the configured rules.`
+   and exits `3`.
 5. **Preview:** `gmail-tidy preview` renders the proposed actions (dry-run, no
-   writes).
-6. **Apply:** `gmail-tidy apply --yes` re-verifies every message against current
-   state, then executes. Scope escalates to `gmail.modify` + `gmail.labels` only at
-   this point, via a fresh consent prompt.
-7. **Undo:** `gmail-tidy undo <run>` reverses the run — dry-run by default,
-   idempotent, and it **skips messages the user changed since** (see
+   writes). It defaults to the latest run.
+6. **Apply — without `--yes` first.** `gmail-tidy apply` re-verifies every message
+   against current state, then shows you exactly what it will do and asks for
+   confirmation:
+
+   ```
+   $ gmail-tidy apply
+   12 message(s) will be modified.
+   Proceed with apply? [y/N]:
+   ```
+
+   - Type `y` → it executes (escalating to `gmail.modify` + `gmail.labels` via a
+     fresh consent prompt if needed).
+   - Type anything else / press Enter (the default is **No**) → it prints
+     `cancelled.` and exits `5`, writing nothing.
+   - `gmail-tidy apply --yes` skips the prompt entirely and executes immediately.
+7. **Check the result:** `gmail-tidy status` shows your config dir, token/scopes,
+   last run, run count, and the audit-log path. The audit log
+   (`audit.jsonl` in the config dir) records every action it took.
+8. **Undo — dry-run by default, no flags needed.** `gmail-tidy undo <run_id>`
+   **always** prints the inverse plan and exits `0` — that *is* the dry-run; you do
+   **not** need `--dry-run` to preview it. Only `gmail-tidy undo <run_id> --yes`
+   actually writes, and it does so **without any interactive prompt** (there is no
+   confirmation step for `undo`, unlike `apply`). Undo is idempotent and **skips
+   messages you changed since** the run (see
    [docs/safety-and-privacy.md](docs/safety-and-privacy.md)).
 
 ## Scan semantics: `--limit`, pagination, and checkpoint progress
@@ -97,6 +155,52 @@ mailbox** across invocations:
 - **Safety is unchanged.** `scan` is fully read-only; only `apply`/`undo` write
   to Gmail. The checkpoint file only records opaque Gmail pagination tokens and
   rule ids — no message content or headers.
+
+## Batch processing across large mailboxes
+
+For a large mailbox, process it in chunks rather than one giant `scan`:
+
+```bash
+gmail-tidy scan --limit 200     # first 200 new eligible candidates
+gmail-tidy preview              # review what it found
+gmail-tidy apply --yes          # apply (or apply without --yes to confirm)
+gmail-tidy scan --limit 200     # resumes where the last scan left off
+gmail-tidy apply --yes
+# ... repeat ...
+```
+
+Each `scan --limit 200` **automatically resumes** from the previous scan's
+`checkpoint.json` (in the config dir) — it does **not** re-scan messages it already
+processed. Keep repeating until `scan` reports **0 new candidates** (exit `3`,
+`nothing matched the configured rules.`), which means the mailbox is exhausted for
+your current rules.
+
+- **`checkpoint.json` lives in the config dir** (`~/.config/gmail-tidy/`, or
+  `$GMAIL_TIDY_CONFIG`) and records, per rule, the Gmail `pageToken` reached.
+- **Any `config.yaml` edit resets progress automatically** — the checkpoint is keyed
+  to a hash of your rules and `protect.include`/`exclude`, so editing the config
+  invalidates it and the next scan restarts from page 1. This is deliberate and
+  safe (a stale page token under new rules could silently skip messages).
+- **To force a full re-scan without editing config:** delete `checkpoint.json` and
+  the next `scan` restarts from page 1.
+
+## OAuth scope escalation
+
+`scan`, `preview`, and `status` use only the **read-only** scope
+(`gmail.readonly`). `apply` and `undo` escalate to **write** scope
+(`gmail.modify` + `gmail.labels`) automatically on first use, via a fresh consent
+prompt. A cached read-only token is **never silently reused** for a write
+operation — if the stored token lacks the required scopes, the CLI deletes it and
+re-prompts for consent. After escalation, the single token covers both read and
+write commands.
+
+> **Testing-mode tokens expire after 7 days.** Because the OAuth consent screen is
+> in **Testing** publishing status (required while the app is unverified), Google
+> expires refresh tokens after 7 days of Testing-mode use. Expect to re-authenticate
+> roughly weekly: `gmail-tidy auth refresh` (for write scope) or a fresh
+> `gmail-tidy init` / `scan` (for read scope). This is the most common real-world
+> "why did this suddenly need re-auth?" surprise. Full detail:
+> [docs/google-cloud-setup.md](docs/google-cloud-setup.md).
 
 ## Safety model
 
@@ -134,13 +238,65 @@ network.
 | `scan [--limit N] [--rules ID...]` | Build candidate plan → local run file; prints counts only. `--limit N` caps the plan at **N new eligible candidates** (not raw messages fetched). Pagination resumes from a saved checkpoint each run |
 | `preview [--run ID]` | Render a run's proposed actions (dry-run, no writes) |
 | `apply [--run ID] [--yes]` | Re-verify → confirm → execute in batches → journal → audit log |
-| `undo <run ID> [--dry-run] [--yes]` | Reverse a run's actions from its before-state snapshot; idempotent |
+| `undo <run ID> [--yes]` | Reverse a run's actions from its before-state snapshot. **Dry-run by default** — with no flags it prints the inverse plan and exits `0`; `--yes` writes immediately with no prompt. Idempotent |
 | `status` | Account, scopes held, last run, run history, audit-log path |
 | `auth status` / `auth refresh` / `auth revoke` | Inspect / escalate (read-only → `modify` + `labels`) / revoke tokens |
 
 **Exit codes:** `0` success · `1` runtime error · `2` config/usage · `3` nothing to
 do · `4` auth error · `5` cancelled by user · `6` partial success (some batches
 failed; resume with `apply`).
+
+## Windows Task Scheduler
+
+You can schedule gmail-tidy to run cleanup on a timer. Two hard constraints:
+
+- **Only schedule label-only rules.** gmail-tidy's only actions are
+  `add_label` / `remove_label` / `archive` — it has **no delete, trash, or send
+  capability at all**. This is a hard, tool-wide guarantee (enforced by an AST
+  test), not just a config choice, so a scheduled run cannot destroy mail.
+- **A scheduled `apply` MUST include `--yes`.** Without it, `apply` prints
+  `Proceed with apply? [y/N]` and waits for input on stdin — which does not exist
+  in a scheduled task, so the task **hangs** until it times out. Always pass
+  `--yes` in a scheduled command.
+
+Example PowerShell script (`gmail-tidy-scheduled.ps1`) that scans up to 200 new
+candidates and applies them if any were found:
+
+```powershell
+# gmail-tidy-scheduled.ps1
+$ErrorActionPreference = "Stop"
+cd C:\path\to\gmail-tidy
+.\.venv\Scripts\Activate.ps1
+
+gmail-tidy scan --limit 200
+if ($LASTEXITCODE -eq 3) {
+    Write-Output "No new candidates; nothing to do."
+    exit 0
+}
+gmail-tidy apply --yes
+exit $LASTEXITCODE
+```
+
+Register it with Task Scheduler (run as your user, at logon or on a schedule):
+
+```powershell
+schtasks /Create /TN "gmail-tidy cleanup" /TR "powershell -ExecutionPolicy Bypass -File C:\path\to\gmail-tidy-scheduled.ps1" /SC DAILY /ST 09:00
+```
+
+**Failure behavior to plan for:**
+
+- **Expired Testing-mode token → exit `4` (auth error), no automatic recovery.**
+  Because the OAuth consent screen is in Testing status, the token expires after
+  7 days and the scheduled run will fail with an auth error until you
+  re-authenticate manually (`gmail-tidy auth refresh`). There is no self-healing.
+- **Partial failure → exit `6`.** Some batches failed; re-running `apply` resumes
+  the incomplete work.
+- **Log stdout and the exit code somewhere you will actually check.** Redirect the
+  script's output to a file (e.g. append `>> C:\path\to\gmail-tidy.log 2>&1` to the
+  `schtasks` command) so a silent failure is visible.
+
+**Do not schedule `undo`.** `undo` is a manual safety-net operation (dry-run by
+default, `--yes` writes) — it is not something to automate.
 
 ## Documentation
 
