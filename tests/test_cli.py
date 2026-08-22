@@ -701,3 +701,184 @@ def test_summary_with_stats_section(tmp_path, monkeypatch):
     assert "7" in result.output
     assert "3" in result.output
     assert "1" in result.output
+
+
+# --- preview: --compact / --explain / --json --------------------------------
+
+
+def _preview_run(tmp_path, candidates):
+    """Save a run (no config.yaml needed) and return its id."""
+    j = RunJournal(tmp_path / "runs")
+    run_id = j.init_run()
+    j.save_candidates(run_id, candidates)
+    return run_id
+
+
+def test_preview_compact_groups_by_rule_no_config(tmp_path, monkeypatch):
+    """--compact reads only the run journal; no config.yaml, token, or Gmail."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _preview_run(
+        tmp_path,
+        [
+            Candidate(message_id="SECRET-MSG-ID-1", thread_id="SECRET-THREAD-ID", rule_id="r1",
+                      actions=Actions(add_label=["Cleanup/N"], archive=True), in_inbox=True),
+            Candidate(message_id="SECRET-MSG-ID-2", thread_id="SECRET-THREAD-ID", rule_id="r1",
+                      actions=Actions(add_label=["Cleanup/N"], archive=True), in_inbox=True),
+            Candidate(message_id="SECRET-MSG-ID-3", thread_id="SECRET-THREAD-ID", rule_id="r2",
+                      actions=Actions(archive=True), in_inbox=True),
+        ],
+    )
+    result = runner.invoke(app, ["preview", "--run", run_id, "--compact"])
+    assert result.exit_code == 0
+    out = result.output
+    assert "r1: 2 candidate(s)" in out
+    assert "r2: 1 candidate(s)" in out
+    assert "+Cleanup/N, archive (x2)" in out
+    # privacy: no message or thread ids
+    assert "SECRET-MSG-ID" not in out
+    assert "SECRET-THREAD-ID" not in out
+
+
+def test_preview_plain_works_without_config(tmp_path, monkeypatch):
+    """The default preview must keep working with no config.yaml present."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _preview_run(
+        tmp_path,
+        [Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                   actions=Actions(add_label=["Cleanup/N"], archive=True), in_inbox=True)],
+    )
+    result = runner.invoke(app, ["preview", "--run", run_id])
+    assert result.exit_code == 0
+    assert "Cleanup/N" in result.output and "archive" in result.output
+
+
+def test_preview_compact_zero_gmail_calls(tmp_path, monkeypatch):
+    """--compact must never touch credentials/service — prove with assertion raise."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _preview_run(
+        tmp_path,
+        [Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                   actions=Actions(add_label=["Cleanup/N"], archive=True), in_inbox=True)],
+    )
+
+    def _boom(*a, **k):
+        raise AssertionError("preview --compact must not call get_credentials/build_service")
+
+    monkeypatch.setattr(cli, "get_credentials", _boom)
+    monkeypatch.setattr(cli, "build_service", _boom)
+    result = runner.invoke(app, ["preview", "--run", run_id, "--compact"])
+    assert result.exit_code == 0
+
+
+def test_preview_json_serializes_run_file_fields_only(tmp_path, monkeypatch):
+    """--json emits exactly the whitelisted run-file fields and a run key."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _preview_run(
+        tmp_path,
+        [Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                   actions=Actions(add_label=["Cleanup/N"], remove_label=["Promo"], archive=True),
+                   before_labels={"INBOX", "Promo"}, in_inbox=True)],
+    )
+    result = runner.invoke(app, ["preview", "--run", run_id, "--json"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["run"] == run_id
+    cand = data["candidates"][0]
+    assert set(cand) == {"message_id", "thread_id", "rule_id", "actions",
+                         "before_labels", "in_inbox"}
+    assert set(cand["actions"]) == {"add_label", "remove_label", "archive"}
+    # no new privacy-sensitive fields invented by JSON
+    assert "sender" not in cand and "subject" not in cand and "body" not in cand
+    assert cand["before_labels"] == ["INBOX", "Promo"]  # sorted by the journal
+
+
+def test_preview_json_conflicts_with_compact(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _preview_run(
+        tmp_path,
+        [Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                   actions=Actions(add_label=["Cleanup/N"], archive=True), in_inbox=True)],
+    )
+    result = runner.invoke(app, ["preview", "--run", run_id, "--json", "--compact"])
+    assert result.exit_code == 2
+    assert "mutually exclusive" in result.output.lower()
+
+
+def test_preview_explain_requires_config(tmp_path, monkeypatch):
+    """--explain needs config.yaml: missing config exits 2, Gmail never touched."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+
+    def _boom(*a, **k):
+        raise AssertionError("preview --explain must not call get_credentials/build_service")
+
+    monkeypatch.setattr(cli, "get_credentials", _boom)
+    monkeypatch.setattr(cli, "build_service", _boom)
+    result = runner.invoke(app, ["preview", "--explain"])
+    assert result.exit_code == 2
+    assert "no config" in result.output.lower()
+    assert "init" in result.output
+
+
+def test_preview_explain_shows_criteria_only(tmp_path, monkeypatch):
+    """--explain prints match criteria from config.yaml, never actions or data."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "rules:\n"
+        "  - id: r1\n"
+        "    match: {subject_contains: [newsletter], older_than_days: 30, unread: true}\n"
+        "    actions:\n"
+        "      add_label: [Cleanup/N]\n"
+        "      archive: true\n"
+        "  - id: r2\n"
+        "    match: {from_contains: [news@example.com]}\n"
+        "    actions:\n"
+        "      add_label: [Cleanup/M]\n",
+        encoding="utf-8",
+    )
+
+    def _boom(*a, **k):
+        raise AssertionError("preview --explain must not call get_credentials/build_service")
+
+    monkeypatch.setattr(cli, "get_credentials", _boom)
+    monkeypatch.setattr(cli, "build_service", _boom)
+    result = runner.invoke(app, ["preview", "--explain"])
+    assert result.exit_code == 0
+    out = result.output
+    assert "r1:" in out
+    assert "subject_contains: newsletter" in out
+    assert "older_than_days: 30" in out
+    assert "unread: true" in out
+    assert "r2:" in out
+    assert "from_contains: news@example.com" in out
+    # actions are never part of explain
+    assert "Cleanup/N" not in out
+    assert "archive" not in out
+    # no run data involved
+    assert "candidate" not in out.lower()
+
+
+def test_preview_explain_conflicts(tmp_path, monkeypatch):
+    """--explain combined with --compact or --json is a usage error (exit 2)."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    for combo in (["--explain", "--compact"], ["--explain", "--json"]):
+        result = runner.invoke(app, ["preview", *combo])
+        assert result.exit_code == 2
+        assert "--explain" in result.output
+
+
+def test_preview_unknown_run_no_config_exits_2(tmp_path, monkeypatch):
+    """No config + explicit unknown run still surfaces the missing run."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    result = runner.invoke(app, ["preview", "--run", "does-not-exist", "--compact"])
+    assert result.exit_code == 2
+    assert "not found" in result.output.lower()
+
+
+def test_preview_explain_empty_rules_config(tmp_path, monkeypatch):
+    """A config with no rules: explain prints the no-rules notice, exit 0."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text("rules: []\n", encoding="utf-8")
+    result = runner.invoke(app, ["preview", "--explain"])
+    assert result.exit_code == 0
+    assert "no rules" in result.output.lower()

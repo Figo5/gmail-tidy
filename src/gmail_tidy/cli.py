@@ -25,6 +25,7 @@ from gmail_tidy.errors import (
     EXIT_OK, EXIT_RUNTIME, EXIT_CONFIG, EXIT_NOOP, EXIT_AUTH, EXIT_CANCELLED,
 )
 from gmail_tidy.gmail_client import GmailClient
+from gmail_tidy import render as render_mod
 from gmail_tidy.undo import build_undo_plan, execute_undo
 
 app = typer.Typer(add_completion=False)
@@ -245,29 +246,53 @@ def summary(run: str | None = typer.Option(None, "--run")):
 
 
 @app.command()
-def preview(run: str | None = typer.Option(None, "--run")):
-    """Render a run's proposed actions (dry-run, no writes)."""
+def preview(run: str | None = typer.Option(None, "--run"),
+            compact: bool = typer.Option(False, "--compact",
+                                         help="One-line grouping per rule; no message ids."),
+            explain: bool = typer.Option(False, "--explain",
+                                         help="Show rule match criteria from config.yaml instead of a run."),
+            json_: bool = typer.Option(False, "--json",
+                                       help="Emit machine-readable JSON of a run's candidates.")):
+    """Render a run's proposed actions (dry-run, no writes).
+
+    Plain and --compact previews read ONLY the local run journal and never
+    require config.yaml, a token, or any Gmail call (same posture as `status`
+    and `summary`). --explain requires config.yaml and prints only the match
+    criteria configured for each rule. --json conflicts with --compact and
+    --explain and serializes only the fields that already exist in a run file.
+    """
     try:
-        cfg_dir, _cfg = _load_config()
+        cfg_dir = config_mod.config_dir()
+        if explain:
+            if compact or json_:
+                raise ConfigError("--explain cannot be combined with --compact or --json")
+            _, cfg = _load_config()
+            console.print("\n".join(render_mod.explain_lines(cfg.rules)))
+            raise typer.Exit(EXIT_OK)
+        if compact and json_:
+            raise ConfigError("--compact and --json are mutually exclusive")
+        # Plain/compact/--json: read-only, no config.yaml required.
         journal = audit_mod.RunJournal(cfg_dir / "runs")
         run_id = run or _latest_run(journal)
         if not run_id:
             console.print("no run found — run `gmail-tidy scan` first.")
             raise typer.Exit(EXIT_NOOP)
-        candidates = journal.load_candidates(run_id)
+        try:
+            candidates = journal.load_candidates(run_id)
+        except FileNotFoundError:
+            raise ConfigError(f"run {run_id} not found") from None
+        if json_:
+            console.print(render_mod.json_text(run_id, candidates))
+            raise typer.Exit(EXIT_OK)
+        if compact:
+            console.print("\n".join(render_mod.compact_lines(run_id, candidates)))
+            raise typer.Exit(EXIT_OK)
         table = Table(title=f"Run {run_id} — proposed actions (dry-run)")
         table.add_column("id")
         table.add_column("rule")
         table.add_column("actions")
         for c in candidates:
-            acts: list[str] = []
-            if c.actions.add_label:
-                acts.append("+".join(c.actions.add_label))
-            if c.actions.remove_label:
-                acts.append("-".join(c.actions.remove_label))
-            if c.actions.archive:
-                acts.append("archive")
-            table.add_row(c.message_id, c.rule_id, ", ".join(acts))
+            table.add_row(c.message_id, c.rule_id, render_mod.action_text(c.actions))
         console.print(table)
         console.print(f"[dim]{len(candidates)} message(s). Apply with `gmail-tidy apply --yes`.[/dim]")
         raise typer.Exit(EXIT_OK)
