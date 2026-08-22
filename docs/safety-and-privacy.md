@@ -69,6 +69,41 @@ failure model, the undo contract, and the minimal-data policy. All invariants ar
 | 5 | Cancelled by user |
 | 6 | Partial success (some batches failed; resume with `apply`) |
 
+## Headless `run` command (Task Scheduler)
+
+`gmail-tidy run` is the single-shot scan + apply entry point for unattended
+scheduling. It reuses the exact scan/apply/audit/checkpoint engine of the
+interactive commands but is deliberately stripped of everything a scheduled
+task cannot safely do:
+
+- **It never launches an OAuth browser and never refreshes a token.** Before any
+  service is constructed, it checks the cached `token.json`'s persisted scopes
+  (`gmail.modify` + `gmail.labels`). A missing, read-only, or unreadable token
+  fails with a clear message and exit **4** — `run` never falls through to
+  `get_credentials`'s interactive consent path and never deletes your token.
+- **It never prompts on stdin.** Candidates are applied through the existing
+  `apply_run` with a non-interactive confirmation (always true), so a
+  console-less scheduled task cannot hang on `[y/N]`.
+- **No automatic self-healing.** A scheduled run that starts failing with exit 4
+  stays failing until you run `gmail-tidy auth refresh` once interactively.
+- **`--dry-run` exits `0` and never writes.** It scans, journals the plan like
+  `scan` does, and stops before the apply phase.
+- **No candidates exits `0`** with a `nothing matched` message (not exit 3, so a
+  scheduled "nothing to do" is a clean success).
+- **Partial failures exit `6`** and are recorded in the run journal exactly as
+  with interactive `apply`; a later `run` or `apply` resumes them.
+- **Output is aggregate-only.** `run` prints counts, the random run id, and a
+  fixed status word (`applied`, `partial`, `dry-run`) — never message ids,
+  thread ids, or content. A scheduled run can be logged to a file without
+  leaking mailbox identifiers.
+- **No new persisted state and no new Gmail surface.** `run` writes the same
+  checkpoint, run journal, run stats, and audit log the interactive commands
+  write; it never shells out to `schtasks` or any subprocess.
+
+Scheduling itself is always manual (`schtasks` / `Register-ScheduledTask`), run
+as your user so the task can read your token and config — see the README's
+[Windows Task Scheduler](../README.md#windows-task-scheduler) section.
+
 ## Undo contract
 
 The run file records each message's **pre-apply label set**. `undo <run>` rebuilds

@@ -22,10 +22,11 @@ from gmail_tidy.actions import apply_run, scan as build_scan  # alias: command n
 from gmail_tidy.checkpoint import checkpoint_path, load_checkpoint, save_checkpoint
 from gmail_tidy.errors import (
     AuthError, ConfigError, NoWorkError,
-    EXIT_OK, EXIT_RUNTIME, EXIT_CONFIG, EXIT_NOOP, EXIT_AUTH, EXIT_CANCELLED,
+    EXIT_OK, EXIT_RUNTIME, EXIT_CONFIG, EXIT_NOOP, EXIT_AUTH, EXIT_CANCELLED, EXIT_PARTIAL,
 )
 from gmail_tidy.gmail_client import GmailClient
 from gmail_tidy import render as render_mod
+from gmail_tidy import runner as runner_mod
 from gmail_tidy.undo import build_undo_plan, execute_undo
 
 app = typer.Typer(add_completion=False)
@@ -140,6 +141,51 @@ def scan(limit: int | None = typer.Option(None, "--limit"),
             console.print("nothing matched the configured rules.")
             raise typer.Exit(EXIT_NOOP)
         console.print(f"[green]scan complete[/green]: {len(candidates)} candidate(s) — run {run_id}")
+        raise typer.Exit(EXIT_OK)
+    except (ConfigError, AuthError, NoWorkError) as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(_exit_for(e))
+
+
+@app.command()
+def run(limit: int | None = typer.Option(None, "--limit"),
+        rules: list[str] = typer.Option(None, "--rules"),
+        dry_run: bool = typer.Option(False, "--dry-run")):
+    """Headless single-shot scan + apply for Task Scheduler.
+
+    Scans up to --limit new eligible candidates and applies them in one
+    invocation, reusing the existing scan/apply/audit/checkpoint engine. Safe
+    for unattended runs:
+
+    - never opens a browser: requires a cached token with write scopes
+      (run `gmail-tidy auth refresh` once interactively) and exits 4 before
+      touching Gmail if it is missing;
+    - never prompts: apply is noninteractive;
+    - --dry-run scans and reports counts only, exits 0, never writes;
+    - no candidates exits 0 (nothing to do);
+    - stdout carries only aggregate counts, random run ids, and a fixed status
+      word — never message/thread ids or content.
+    """
+    try:
+        cfg_dir, cfg = _load_config()
+        # Headless gate: never launch OAuth/browser. Exit 4 before any service.
+        runner_mod.require_write_scope_headless(cfg_dir)
+        client = GmailClient(build_service(runner_mod.headless_credentials(cfg_dir)))
+        outcome = runner_mod.run_cycle(client, cfg, cfg_dir, limit=limit,
+                                       rules=rules, dry_run=dry_run)
+        if outcome.status == "noop":
+            console.print("run complete: 0 candidate(s) — nothing matched the configured rules")
+            raise typer.Exit(EXIT_OK)
+        if outcome.status == "dry-run":
+            console.print(f"[green]run dry-run complete[/green]: {outcome.candidates} candidate(s) — "
+                          f"run {outcome.run_id} (no writes)")
+            raise typer.Exit(EXIT_OK)
+        if outcome.exit_code == EXIT_PARTIAL:
+            console.print(f"[yellow]run complete: partial[/yellow]: {outcome.candidates} candidate(s) "
+                          f"processed, some failed — run {outcome.run_id}")
+            raise typer.Exit(EXIT_PARTIAL)
+        console.print(f"[green]run complete: applied[/green]: {outcome.candidates} candidate(s) — "
+                      f"run {outcome.run_id}")
         raise typer.Exit(EXIT_OK)
     except (ConfigError, AuthError, NoWorkError) as e:
         console.print(f"[red]{e}[/red]")

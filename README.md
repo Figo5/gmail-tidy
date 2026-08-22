@@ -241,6 +241,7 @@ network.
 |---|---|
 | `init` | Create config dir + commented template (presets disabled), start read-only OAuth |
 | `scan [--limit N] [--rules ID...]` | Build candidate plan → local run file; prints counts only. `--limit N` caps the plan at **N new eligible candidates** (not raw messages fetched). Pagination resumes from a saved checkpoint each run |
+| `run [--limit N] [--rules ID...] [--dry-run]` | Headless single-shot scan + apply for Task Scheduler. Never opens a browser or prompts; see [Windows Task Scheduler](#windows-task-scheduler) |
 | `preview [--run ID]` | Render a run's proposed actions (dry-run, no writes) |
 | `apply [--run ID] [--yes]` | Re-verify → confirm → execute in batches → journal → audit log |
 | `undo <run ID> [--apply] [--yes]` | Reverse a run's actions from its before-state snapshot. **Dry-run by default** — with no flags it prints the inverse plan and exits `0`. A write requires `--apply`: `--apply` alone prompts for confirmation (decline exits `5`), `--apply --yes` writes immediately with no prompt. `--yes` without `--apply` is a usage error (exit 2). Idempotent |
@@ -253,52 +254,70 @@ failed; resume with `apply`).
 
 ## Windows Task Scheduler
 
-You can schedule gmail-tidy to run cleanup on a timer. Two hard constraints:
+You can schedule gmail-tidy to run cleanup on a timer. The dedicated `run`
+command is the single-shot entry point for scheduled execution:
 
-- **Only schedule label-only rules.** gmail-tidy's only actions are
-  `add_label` / `remove_label` / `archive` — it has **no delete, trash, or send
-  capability at all**. This is a hard, tool-wide guarantee (enforced by an AST
-  test), not just a config choice, so a scheduled run cannot destroy mail.
-- **A scheduled `apply` MUST include `--yes`.** Without it, `apply` prints
-  `Proceed with apply? [y/N]` and waits for input on stdin — which does not exist
-  in a scheduled task, so the task **hangs** until it times out. Always pass
-  `--yes` in a scheduled command.
-
-Example PowerShell script (`gmail-tidy-scheduled.ps1`) that scans up to 200 new
-candidates and applies them if any were found:
-
-```powershell
-# gmail-tidy-scheduled.ps1
-$ErrorActionPreference = "Stop"
-cd C:\path\to\gmail-tidy
-.\.venv\Scripts\Activate.ps1
-
-gmail-tidy scan --limit 200
-if ($LASTEXITCODE -eq 3) {
-    Write-Output "No new candidates; nothing to do."
-    exit 0
-}
-gmail-tidy apply --yes
-exit $LASTEXITCODE
+```
+gmail-tidy run [--limit N] [--rules ID...] [--dry-run]
 ```
 
-Register it with Task Scheduler (run as your user, at logon or on a schedule):
+`run` scans and applies in one invocation, reusing the exact same scan/apply/
+audit/checkpoint engine as the interactive commands. It is designed so a
+scheduled task cannot hang or misbehave:
+
+- **Never opens a browser.** `run` requires a cached token that already carries
+  the write scopes (`gmail.modify` + `gmail.labels`). If the token is missing,
+  read-only, or expired it prints a clear message and exits **`4`** *before*
+  contacting Gmail — a scheduled run will never silently trigger an OAuth flow
+  or block waiting for a browser.
+- **Never prompts.** Candidates are applied non-interactively; there is no
+  `Proceed with apply? [y/N]` to block on a console-less task.
+- **Never self-heals.** There is no automatic scope escalation or credential
+  refresh. If a scheduled run starts failing with exit `4`, re-authenticate once
+  interactively (`gmail-tidy auth refresh`) and the next scheduled run works.
+- **`--dry-run`** scans and prints aggregate counts only, exits `0`, and never
+  writes to Gmail. Use it to smoke-test a new schedule before letting it apply.
+- **No candidates → exit `0`** (`nothing matched the configured rules.`), so the
+  scheduled run reads as success with nothing to do.
+- **Log-output privacy.** `run` prints only aggregate counts, random run ids,
+  and a fixed status word (`applied`, `partial`, `dry-run`) — never message ids,
+  thread ids, or message content.
+
+Register a scheduled task directly with `schtasks` (no wrapper script needed):
 
 ```powershell
-schtasks /Create /TN "gmail-tidy cleanup" /TR "powershell -ExecutionPolicy Bypass -File C:\path\to\gmail-tidy-scheduled.ps1" /SC DAILY /ST 09:00
+# Requires the write-scoped cached token (run `gmail-tidy auth refresh` once
+# interactively from an authenticated shell) and the config dir in place.
+schtasks /Create /TN "gmail-tidy cleanup" /TR "cmd /c C:\path\to\gmail-tidy\.venv\Scripts\gmail-tidy.exe run --limit 200 >> C:\path\to\gmail-tidy.log 2>&1" /SC DAILY /ST 09:00
 ```
+
+Or via the PowerShell `Register-ScheduledTask` cmdlet:
+
+```powershell
+$action  = New-ScheduledTaskAction -Execute "C:\path\to\gmail-tidy\.venv\Scripts\gmail-tidy.exe" `
+    -Argument "run --limit 200" `
+    -WorkingDirectory "C:\path\to\gmail-tidy"
+$trigger = New-ScheduledTaskTrigger -Daily -At 09:00
+Register-ScheduledTask -TaskName "gmail-tidy cleanup" -Action $action -Trigger $trigger `
+    -RunLevel Limited -Description "Headless gmail-tidy scan + apply"
+```
+
+> Register the task to run **as your user** (not SYSTEM) so it can read your
+> OAuth token and config from your profile. `run` never shell out to `schtasks`
+> itself — scheduling is always done manually.
 
 **Failure behavior to plan for:**
 
-- **Expired Testing-mode token → exit `4` (auth error), no automatic recovery.**
+- **Expired Testing-mode token → exit `4`, no automatic recovery.**
   Because the OAuth consent screen is in Testing status, the token expires after
   7 days and the scheduled run will fail with an auth error until you
   re-authenticate manually (`gmail-tidy auth refresh`). There is no self-healing.
-- **Partial failure → exit `6`.** Some batches failed; re-running `apply` resumes
-  the incomplete work.
-- **Log stdout and the exit code somewhere you will actually check.** Redirect the
-  script's output to a file (e.g. append `>> C:\path\to\gmail-tidy.log 2>&1` to the
-  `schtasks` command) so a silent failure is visible.
+- **Partial failure → exit `6`.** Some batches failed; the run journal records
+  the failures, and a later scheduled `run` (or a manual `gmail-tidy apply`)
+  resumes the incomplete work.
+- **Log stdout/stderr and the exit code somewhere you will actually check.**
+  Redirect the output to a file (e.g. `>> C:\path\to\gmail-tidy.log 2>&1` in the
+  `schtasks` command above) so a silent failure is visible.
 
 **Do not schedule `undo`.** `undo` is a manual safety-net operation (dry-run by
 default; a real write requires `--apply`, and `--apply --yes` writes without a
