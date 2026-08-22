@@ -6,6 +6,9 @@ All commands talk to Gmail by design; write commands require confirmation
 
 from __future__ import annotations
 
+import json
+from collections import Counter
+from dataclasses import asdict
 from pathlib import Path
 
 import typer
@@ -119,7 +122,7 @@ def scan(limit: int | None = typer.Option(None, "--limit"),
             save_checkpoint(cp_path, cp)
             console.print(f"[dim]rule {rule_id}: done ({n_candidates} candidates so far)[/dim]")
 
-        candidates, new_cp, _stats = build_scan(
+        candidates, new_cp, stats = build_scan(
             client, cfg, limit=limit, checkpoint=cp, full=all_,
             on_progress=_on_progress if all_ else None,
         )
@@ -131,6 +134,7 @@ def scan(limit: int | None = typer.Option(None, "--limit"),
         journal = audit_mod.RunJournal(cfg_dir / "runs")
         run_id = journal.init_run()
         journal.save_candidates(run_id, candidates)
+        journal.save_stats(run_id, asdict(stats))   # persist aggregate scan stats
         if not candidates:
             console.print("nothing matched the configured rules.")
             raise typer.Exit(EXIT_NOOP)
@@ -139,6 +143,105 @@ def scan(limit: int | None = typer.Option(None, "--limit"),
     except (ConfigError, AuthError, NoWorkError) as e:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(_exit_for(e))
+
+
+@app.command()
+def summary(run: str | None = typer.Option(None, "--run")):
+    """Aggregate a run's plan: totals, by-rule/action/label, stats, checkpoint.
+
+    Reads ONLY local run/checkpoint data — never contacts Gmail, so it works
+    with no config.yaml/token/credentials present (same as `status`).
+    """
+    try:
+        cfg_dir = config_mod.config_dir()
+        journal = audit_mod.RunJournal(cfg_dir / "runs")
+        run_id = run or _latest_run(journal)
+        if not run_id:
+            console.print("no run found — run `gmail-tidy scan` first.")
+            raise typer.Exit(EXIT_NOOP)
+        candidates = journal.load_candidates(run_id)
+        stats = journal.load_stats(run_id)
+
+        # --- Totals ------------------------------------------------------
+        console.print(f"[bold]Run {run_id}[/bold]")
+        console.print("Totals:")
+        console.print(f"  candidates       : {len(candidates)}")
+        inbox_reduction = sum(1 for c in candidates if c.in_inbox and c.actions.archive)
+        console.print(f"  inbox reduction  : {inbox_reduction}")
+        labels_only = sum(1 for c in candidates if not c.actions.archive)
+        archive_count = sum(1 for c in candidates if c.actions.archive)
+        console.print(f"  labels-only      : {labels_only}")
+        console.print(f"  archive action   : {archive_count}")
+
+        # --- By rule -----------------------------------------------------
+        by_rule = Counter(c.rule_id for c in candidates)
+        if by_rule:
+            table = Table(title="By rule")
+            table.add_column("rule")
+            table.add_column("candidates")
+            for rid, count in sorted(by_rule.items()):
+                table.add_row(rid, str(count))
+            console.print(table)
+
+        # --- By action ---------------------------------------------------
+        add_ops = sum(len(c.actions.add_label) for c in candidates)
+        remove_ops = sum(len(c.actions.remove_label) for c in candidates)
+        console.print("By action:")
+        console.print(f"  labels added    : {add_ops}")
+        console.print(f"  labels removed  : {remove_ops}")
+        console.print(f"  archived        : {archive_count}")
+
+        # --- By label (added) --------------------------------------------
+        by_add = Counter(l for c in candidates for l in c.actions.add_label)
+        if by_add:
+            table = Table(title="By label (added)")
+            table.add_column("label")
+            table.add_column("count")
+            for label, count in sorted(by_add.items()):
+                table.add_row(label, str(count))
+            console.print(table)
+
+        # --- By label (removed) — only if non-empty ----------------------
+        by_remove = Counter(l for c in candidates for l in c.actions.remove_label)
+        if by_remove:
+            table = Table(title="By label (removed)")
+            table.add_column("label")
+            table.add_column("count")
+            for label, count in sorted(by_remove.items()):
+                table.add_row(label, str(count))
+            console.print(table)
+
+        # --- Scan stats --------------------------------------------------
+        if stats is None:
+            console.print("Scan stats:")
+            console.print("  scan stats not recorded for this run")
+        else:
+            console.print("Scan stats:")
+            console.print(f"  evaluated : {stats.get('evaluated', 0)}")
+            console.print(f"  excluded  : {stats.get('excluded', 0)}")
+            console.print(f"  noop      : {stats.get('noop', 0)}")
+            console.print(f"  candidates: {stats.get('candidates', 0)}")
+
+        # --- Checkpoint --------------------------------------------------
+        console.print("Checkpoint:")
+        try:
+            cp_data = json.loads((cfg_dir / "checkpoint.json").read_text(encoding="utf-8"))
+            cp_rules = cp_data.get("rules", {})
+            if not cp_rules:
+                console.print("  no checkpoint yet")
+            for rid, r in sorted(cp_rules.items()):
+                state = "exhausted" if r.get("exhausted") else "in-progress"
+                console.print(f"  {rid}: {state}")
+        except (OSError, ValueError):
+            console.print("  no checkpoint yet")
+
+        raise typer.Exit(EXIT_OK)
+    except FileNotFoundError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(EXIT_CONFIG)
+    except ConfigError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(EXIT_CONFIG)
 
 
 @app.command()

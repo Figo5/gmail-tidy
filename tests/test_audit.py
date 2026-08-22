@@ -30,3 +30,22 @@ def test_journal_roundtrip_and_failures(tmp_path):
     j.record_failure(run_id, "m1", "rate limited")
     assert j.failures(run_id) == ["m1: rate limited"]
     assert run_id in j.list_runs()
+
+
+def test_save_load_stats_roundtrip_and_missing(tmp_path):
+    j = RunJournal(tmp_path / "runs")
+    run_id = j.init_run()
+    stats = {"evaluated": 5, "excluded": 2, "noop": 1, "candidates": 2}
+    j.save_stats(run_id, stats)
+    assert j.load_stats(run_id) == stats
+    other = j.init_run()
+    assert j.load_stats(other) is None  # old run with no stats file
+
+
+def test_list_runs_ignores_stats_files(tmp_path):
+    """A saved stats file must not pollute the run journal as a spurious run."""
+    j = RunJournal(tmp_path / "runs")
+    run_id = j.init_run()
+    j.save_candidates(run_id, [])
+    j.save_stats(run_id, {"evaluated": 0, "excluded": 0, "noop": 0, "candidates": 0})
+    assert j.list_runs() == [run_id]

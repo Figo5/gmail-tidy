@@ -2,6 +2,7 @@
 get_credentials/build_service monkeypatched, so nothing touches a network, an
 OAuth browser flow, or real credentials."""
 
+import json
 import os
 import subprocess
 import sys
@@ -477,3 +478,226 @@ def test_module_main_runs_help_offline():
     )
     assert result.returncode == 0
     assert "python -m gmail_tidy" in (result.stdout + result.stderr)
+
+
+# --- summary ---------------------------------------------------------------
+
+
+def _save_run_with_stats(tmp_path, candidates, stats=None) -> str:
+    j = RunJournal(tmp_path / "runs")
+    run_id = j.init_run()
+    j.save_candidates(run_id, candidates)
+    if stats is not None:
+        j.save_stats(run_id, stats)
+    return run_id
+
+
+def test_summary_mixed_rules_actions_labels(tmp_path, monkeypatch):
+    """Candidates spanning 2+ rules, add+remove labels, some archived some not."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _save_run_with_stats(
+        tmp_path,
+        [
+            Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                      actions=Actions(add_label=["Cleanup/A"], remove_label=["Promo"],
+                                      archive=True), in_inbox=True),
+            Candidate(message_id="m2", thread_id="t2", rule_id="r1",
+                      actions=Actions(add_label=["Cleanup/A"], archive=False), in_inbox=True),
+            Candidate(message_id="m3", thread_id="t3", rule_id="r2",
+                      actions=Actions(add_label=["Cleanup/B"], archive=False), in_inbox=False),
+        ],
+        stats={"evaluated": 10, "excluded": 4, "noop": 2, "candidates": 3},
+    )
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    assert result.exit_code == 0
+    out = result.output
+    # totals
+    assert "3" in out  # total candidates
+    # by rule
+    assert "r1" in out and "r2" in out
+    # by action: 2 add_label ops, 1 remove_label op, 1 archived
+    # labels added: Cleanup/A (x2), Cleanup/B (x1); removed: Promo (x1)
+    assert "Cleanup/A" in out
+    assert "Cleanup/B" in out
+    assert "Promo" in out
+    # archive breakdown: labels-only count == 2, archive-action count == 1
+    # inbox reduction == 1 (only m1 is both in_inbox and archive)
+    # scan stats present
+    assert "evaluated" in out and "excluded" in out
+
+
+def test_summary_zero_candidate_run_exits_zero(tmp_path, monkeypatch):
+    """A 0-candidate run is a legitimate already-created run: exit 0, not an error."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _save_run_with_stats(tmp_path, [],
+                                  stats={"evaluated": 0, "excluded": 5, "noop": 2, "candidates": 0})
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    assert result.exit_code == 0
+    assert "0" in result.output
+
+
+def test_summary_no_runs_exits_3(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    result = runner.invoke(app, ["summary"])
+    assert result.exit_code == 3
+    assert "no run found" in result.output
+
+
+def test_summary_old_run_without_stats_graceful(tmp_path, monkeypatch):
+    """Old run saved before stats existed: no crash, 'not recorded' message, exit 0."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _save_run_with_stats(
+        tmp_path,
+        [Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                   actions=Actions(add_label=["Cleanup/A"], archive=True), in_inbox=True)],
+        stats=None,  # no stats file written (simulates pre-feature run)
+    )
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    assert result.exit_code == 0
+    assert "not recorded" in result.output.lower()
+
+
+def test_summary_checkpoint_exhaustion_state(tmp_path, monkeypatch):
+    """One exhausted rule + one in-progress rule both shown correctly."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _save_run_with_stats(
+        tmp_path,
+        [Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                   actions=Actions(add_label=["Cleanup/A"], archive=True), in_inbox=True)],
+        stats={"evaluated": 1, "excluded": 0, "noop": 0, "candidates": 1},
+    )
+    (tmp_path / "checkpoint.json").write_text(
+        json.dumps({
+            "config_fingerprint": "fp",
+            "rules": {
+                "r1": {"page_token": None, "exhausted": True},
+                "r2": {"page_token": "abc123", "exhausted": False},
+            },
+        }),
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    assert result.exit_code == 0
+    out = result.output
+    assert "exhausted" in out.lower()
+    # r1 exhausted, r2 in-progress (has a page token)
+    assert "r1" in out and "r2" in out
+
+
+def test_summary_checkpoint_missing_graceful(tmp_path, monkeypatch):
+    """No checkpoint.json present: print 'no checkpoint yet' rather than crash."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _save_run_with_stats(
+        tmp_path,
+        [Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                   actions=Actions(add_label=["Cleanup/A"], archive=True), in_inbox=True)],
+        stats={"evaluated": 1, "excluded": 0, "noop": 0, "candidates": 1},
+    )
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    assert result.exit_code == 0
+    assert "no checkpoint" in result.output.lower()
+
+
+def test_summary_inbox_reduction_calculation(tmp_path, monkeypatch):
+    """True/True -> counted; True/False and False/True -> not counted. Reduction == 1."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _save_run_with_stats(
+        tmp_path,
+        [
+            Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                      actions=Actions(archive=True), in_inbox=True),   # counted
+            Candidate(message_id="m2", thread_id="t2", rule_id="r1",
+                      actions=Actions(archive=False), in_inbox=True),  # not archived
+            Candidate(message_id="m3", thread_id="t3", rule_id="r1",
+                      actions=Actions(archive=True), in_inbox=False),  # not in inbox
+        ],
+        stats={"evaluated": 3, "excluded": 0, "noop": 0, "candidates": 3},
+    )
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    assert result.exit_code == 0
+    out = result.output
+    # assert exactly the inbox-reduction line equals 1 (not 3)
+    # cli.py prints f"  inbox reduction  : {inbox_reduction}" (2 spaces each side of the colon)
+    assert "  inbox reduction  : 1" in out
+
+
+def test_summary_output_has_no_message_ids(tmp_path, monkeypatch):
+    """Distinctive fake ids must never leak into summary output."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _save_run_with_stats(
+        tmp_path,
+        [Candidate(message_id="SECRET-MSG-ID-1", thread_id="SECRET-THREAD-ID",
+                   rule_id="r1", actions=Actions(add_label=["Cleanup/A"], archive=True),
+                   in_inbox=True)],
+        stats={"evaluated": 1, "excluded": 0, "noop": 0, "candidates": 1},
+    )
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    assert result.exit_code == 0
+    assert "SECRET-MSG-ID" not in result.output
+    assert "SECRET-THREAD-ID" not in result.output
+
+
+def test_summary_makes_zero_gmail_calls(tmp_path, monkeypatch):
+    """summary must never touch credentials/service — prove with an assertion raise."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _save_run_with_stats(
+        tmp_path,
+        [Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                   actions=Actions(add_label=["Cleanup/A"], archive=True), in_inbox=True)],
+        stats={"evaluated": 1, "excluded": 0, "noop": 0, "candidates": 1},
+    )
+
+    def _boom(*a, **k):
+        raise AssertionError("summary must not call get_credentials/build_service")
+
+    monkeypatch.setattr(cli, "get_credentials", _boom)
+    monkeypatch.setattr(cli, "build_service", _boom)
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    assert result.exit_code == 0
+
+
+def test_summary_unknown_run_exits_2(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    result = runner.invoke(app, ["summary", "--run", "does-not-exist"])
+    assert result.exit_code == 2
+
+
+def test_summary_defaults_to_latest_run(tmp_path, monkeypatch):
+    """No --run: summary reports the LATEST run (by mtime), not an older one."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    old_id = _save_run_with_stats(
+        tmp_path,
+        [Candidate(message_id="m1", thread_id="t1", rule_id="old-rule",
+                   actions=Actions(add_label=["Cleanup/Old"], archive=True), in_inbox=True)],
+        stats={"evaluated": 1, "excluded": 0, "noop": 0, "candidates": 1},
+    )
+    new_id = _save_run_with_stats(
+        tmp_path,
+        [Candidate(message_id="m2", thread_id="t2", rule_id="new-rule",
+                   actions=Actions(add_label=["Cleanup/New"], archive=True), in_inbox=True)],
+        stats={"evaluated": 1, "excluded": 0, "noop": 0, "candidates": 1},
+    )
+    # Force deterministic ordering: two writes within one clock tick get equal
+    # mtimes on Windows, so pin the OLD run's file to an explicitly earlier time.
+    os.utime(tmp_path / "runs" / f"{old_id}.json", (1000000, 1000000))
+    os.utime(tmp_path / "runs" / f"{new_id}.json", (2000000, 2000000))
+    result = runner.invoke(app, ["summary"])
+    assert result.exit_code == 0
+    assert "new-rule" in result.output
+    assert "old-rule" not in result.output
+
+
+def test_summary_with_stats_section(tmp_path, monkeypatch):
+    """Scan stats section shows evaluated/excluded/noop/candidates when present."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _save_run_with_stats(
+        tmp_path,
+        [Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                   actions=Actions(add_label=["Cleanup/A"], archive=True), in_inbox=True)],
+        stats={"evaluated": 7, "excluded": 3, "noop": 1, "candidates": 1},
+    )
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    assert result.exit_code == 0
+    assert "7" in result.output
+    assert "3" in result.output
+    assert "1" in result.output

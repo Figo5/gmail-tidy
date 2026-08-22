@@ -112,6 +112,23 @@ class RunJournal:
             for d in data
         ]
 
+    def save_stats(self, run_id: str, stats: dict) -> None:
+        """Persist aggregate ScanStats counts (evaluated/excluded/noop/candidates).
+
+        Accepts a plain dict (asdict(ScanStats)) to avoid importing actions.ScanStats
+        here — actions imports audit, so the reverse import would be circular.
+        """
+        path = self.dir / f"{run_id}.stats.json"
+        path.write_text(json.dumps(stats), encoding="utf-8")
+        _chmod_600(path)
+
+    def load_stats(self, run_id: str) -> dict | None:
+        """Return the persisted stats dict for a run, or None if never saved (old runs)."""
+        path = self.dir / f"{run_id}.stats.json"
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+
     def record_failure(self, run_id: str, message_id: str, err: str) -> None:
         path = self.dir / f"{run_id}.failures.jsonl"
         with open(path, "a", encoding="utf-8") as fh:
@@ -127,6 +144,7 @@ class RunJournal:
     def list_runs(self) -> list[str]:
         if not self.dir.exists():
             return []
-        files = [p for p in self.dir.glob("*.json")]
+        files = [p for p in self.dir.glob("*.json")
+                 if not p.name.endswith(".stats.json")]  # exclude companion stats files
         files.sort(key=lambda p: p.stat().st_mtime)  # chronological, oldest first
         return [p.stem for p in files]
