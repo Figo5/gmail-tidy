@@ -53,6 +53,62 @@ def test_apply_skips_newly_excluded_message(tmp_path):
     assert not audit.entries()
 
 
+def _include_config():
+    """Config with a label-based include guard: only messages still carrying
+    the 'Keep' label are eligible for r1."""
+    return Config(
+        include=["label:Keep"],
+        rules=[
+            Rule(id="r1", match=MatchConfig(subject_contains=["newsletter"]),
+                 actions=Actions(add_label=["Cleanup/N"], archive=True)),
+        ]
+    )
+
+
+def test_apply_skips_candidate_that_lost_its_include_label(tmp_path):
+    """A candidate that was eligible at scan time but lost its include label
+    before apply must be skipped: no mailbox change and no audit entry."""
+    api = MockGmailApi()
+    # at scan time the message carries the include label 'Keep' -> candidate
+    api.add_message("m1", subject="newsletter", labels={"INBOX", "Keep"})
+    cfg = _include_config()
+    client = GmailClient(api)
+    cands, _cp, _stats = scan(client, cfg)
+    assert [c.message_id for c in cands] == ["m1"]
+    # the include label vanishes between scan and apply (e.g. another process
+    # re-labelled the message, or a Gmail filter did)
+    api.store["m1"].label_ids.discard(api.label_id("Keep"))
+    j = RunJournal(tmp_path / "runs")
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    run_id = j.init_run()
+    j.save_candidates(run_id, cands)
+    result = apply_run(client, cfg, cands, j, audit, run_id, confirm=lambda: True)
+    assert result == EXIT_OK
+    # no mailbox change and no audit entry for the now-unincluded message
+    assert api.label_names_of("m1") == {"INBOX"}
+    assert not audit.entries()
+    assert j.failures(run_id) == []
+
+
+def test_apply_empty_include_remains_allowed(tmp_path):
+    """An empty include list means 'include everything'; apply must not skip
+    an otherwise-eligible candidate just because include is empty."""
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter", labels={"INBOX"})
+    client = GmailClient(api)
+    j = RunJournal(tmp_path / "runs")
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    run_id = j.init_run()
+    cand = Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                     actions=Actions(add_label=["Cleanup/N"], archive=True),
+                     before_labels={"INBOX"}, in_inbox=True)
+    j.save_candidates(run_id, [cand])
+    result = apply_run(client, _config(), [cand], j, audit, run_id, confirm=lambda: True)
+    assert result == EXIT_OK
+    assert "Cleanup/N" in api.label_names_of("m1")
+    assert len(audit.entries()) == 2  # add_label + archive
+
+
 def test_apply_audits_each_action(tmp_path):
     api = MockGmailApi()
     api.add_message("m1", subject="news", labels={"INBOX"})

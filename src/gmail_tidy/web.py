@@ -6,13 +6,17 @@ single-user browser view of data that already lives on disk:
 
 - stdlib only (``http.server``, ``urllib.parse``, ``json``, ``webbrowser``);
 - binds strictly ``127.0.0.1`` — never a routable interface;
+- the transport rejects any request whose ``Host`` header does not name a
+  loopback host (``127.0.0.1`` / ``localhost`` / ``::1``, with optional port
+  or brackets) with a generic 403 before any route or data access;
 - GET-only, fixed route table, no CORS headers, no cookies, ``Cache-Control:
   no-store`` on every response;
 - reads ONLY the allowlisted local files/functions (§6 of the design):
   ``config.yaml`` (projection), ``runs/*.json``/``runs/*.stats.json``,
   ``audit.jsonl``, ``checkpoint.json`` (state only — never page tokens),
-  and ``token.json`` presence + scopes ONLY (the file's bytes are never
-  opened, and ``client_secret*.json`` is never read, never served);
+  and ``token.json`` presence + scopes ONLY (only the ``scopes`` field is
+  read for display names; credential bytes — access/refresh tokens — are
+  never surfaced, and ``client_secret*.json`` is never read, never served);
 - never writes, never contacts Gmail, never imports the Gmail client,
   actions, runner, undo, rules, or labels, and has no authentication layer
   (bearer tokens are explicitly out of scope per the design §4).
@@ -300,6 +304,34 @@ def _json_response(status: int, payload: object, content_type: str = "applicatio
 # ---------------------------------------------------------------------------
 
 
+def _is_loopback_host(host: str) -> bool:
+    """True iff a ``Host`` header value names a loopback host.
+
+    Handles optional ports (``localhost:8765``), bracketed IPv6 with a port
+    (``[::1]:8765``), and IPv6 without brackets/port (``::1``). Only the
+    hostname part is compared; the value is never resolved via DNS, so a
+    rebinding-style foreign name can never satisfy this check. A bare
+    loopback IP without a port (e.g. ``127.0.0.1``) is valid because HTTP/1.0
+    clients may omit the port, and requests over the loopback socket may
+    legitimately carry an absolute-form target with no Host port.
+    """
+    if not host:
+        return False
+    hostname = host.strip()
+    if hostname.startswith("["):  # bracketed IPv6: [::1], [::1]:8765, [::1]:8765/
+        end = hostname.find("]")
+        if end == -1:
+            return False
+        return hostname[1:end] == "::1"
+    # unbracketed: a host:port form has exactly ONE ':' (the port separator).
+    # Multiple colons mean raw unbracketed IPv6 like "::1" — never split it.
+    if hostname.count(":") == 1:
+        head, sep, tail = hostname.partition(":")
+        if tail.isdigit():
+            hostname = head
+    return hostname in ("127.0.0.1", "localhost", "::1")
+
+
 class _WebServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -315,19 +347,37 @@ class _Handler(BaseHTTPRequestHandler):
     sys_version = ""
 
     def do_GET(self):
-        self._respond(handle("GET", self.path, self.server.cfg_dir))
+        self._dispatch("GET")
 
     def do_HEAD(self):
-        self._respond(handle("HEAD", self.path, self.server.cfg_dir))
+        self._dispatch("HEAD")
 
     def do_POST(self):
-        self._respond(handle("POST", self.path, self.server.cfg_dir))
+        self._dispatch("POST")
 
     def do_PUT(self):
-        self._respond(handle("PUT", self.path, self.server.cfg_dir))
+        self._dispatch("PUT")
 
     def do_DELETE(self):
-        self._respond(handle("DELETE", self.path, self.server.cfg_dir))
+        self._dispatch("DELETE")
+
+    def _dispatch(self, method: str):
+        """Transport gate: verify the Host header names a loopback interface
+        BEFORE any route resolution, method check, or filesystem access.
+
+        The server only ever binds 127.0.0.1, but a DNS-rebinding-style request
+        (or a reverse proxy pointed at a public name) can carry a foreign Host
+        header over that socket. Such requests get a generic 403 (no-store)
+        without touching the pure handle() seam or any data. Loopback hosts may
+        carry a port (``localhost:8765``) or bracketed IPv6 (``[::1]:8765``);
+        both are stripped before comparison.
+        """
+        host = self.headers.get("Host", "")
+        if not _is_loopback_host(host):
+            self._respond(Response(status=403, body=json.dumps(
+                {"error": "forbidden"}).encode("utf-8")))
+            return
+        self._respond(handle(method, self.path, self.server.cfg_dir))
 
     def _respond(self, response: Response):
         body = response.body

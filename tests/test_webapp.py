@@ -353,6 +353,90 @@ def test_json_responses_have_no_store_no_cors_no_cookies(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def _raw_http(port: int, host_header: str, path: str = "/healthz",
+              method: str = "GET") -> tuple[int, dict, bytes]:
+    """Send a raw HTTP/1.1 request over the loopback socket with a caller-set
+    Host header (urllib would override Host from the URL). Returns
+    (status, headers, body) parsed from the response."""
+    import socket
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+        req = (f"{method} {path} HTTP/1.1\r\n"
+               f"Host: {host_header}\r\n"
+               "Connection: close\r\n\r\n")
+        s.sendall(req.encode("utf-8"))
+        data = b""
+        while True:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+    head, _, body = data.partition(b"\r\n\r\n")
+    lines = head.decode("latin-1").split("\r\n")
+    status = int(lines[0].split(" ")[1])
+    headers = {}
+    for line in lines[1:]:
+        if ":" in line:
+            key, value = line.split(":", 1)
+            headers[key.strip().lower()] = value.strip()
+    return status, headers, body
+
+
+def test_evil_host_header_rejected_403_before_route_or_data(tmp_path):
+    """A Host header naming a non-loopback host is rejected with a generic 403
+    (no-store) at the transport, before any route resolution or data access —
+    even for valid routes carrying real data, and for non-GET methods."""
+    info = _populate(tmp_path)
+    server = web.make_server(0, tmp_path)
+    port = server.server_address[1]
+    import threading
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    try:
+        for host in ("evil.example.com", "127.0.0.1.evil.com", "example.com:443"):
+            status, headers, body = _raw_http(port, host)
+            assert status == 403, host
+            assert headers["cache-control"] == "no-store"
+            assert json.loads(body) == {"error": "forbidden"}
+        # even a valid route carrying real data must not be reachable
+        status, headers, body = _raw_http(port, "evil.example.com", path="/api/v1/status")
+        assert status == 403
+        assert b"runs_count" not in body
+        assert info["run_id"].encode() not in body
+        # non-GET methods are gated the same way
+        status, _headers, body = _raw_http(port, "evil.example.com", method="POST",
+                                           path="/api/v1/status")
+        assert status == 403
+        assert json.loads(body) == {"error": "forbidden"}
+    finally:
+        server.shutdown()
+        server.server_close()
+        t.join(timeout=5)
+
+
+def test_loopback_host_headers_serve_200(tmp_path):
+    """Loopback Host values — plain, with a port, or bracketed IPv6 — pass the
+    transport gate and serve normally."""
+    info = _populate(tmp_path)
+    server = web.make_server(0, tmp_path)
+    port = server.server_address[1]
+    import threading
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    try:
+        for host in ("127.0.0.1", f"127.0.0.1:{port}", "localhost",
+                     f"localhost:{port}", "[::1]", f"[::1]:{port}", "::1"):
+            status, headers, body = _raw_http(port, host)
+            assert status == 200, host
+            assert json.loads(body) == {"status": "ok"}
+        status, headers, body = _raw_http(port, "localhost", path="/api/v1/status")
+        assert status == 200
+        assert json.loads(body)["runs_count"] == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        t.join(timeout=5)
+
+
 def test_loopback_server_smoke(tmp_path):
     info = _populate(tmp_path)
     server = web.make_server(0, tmp_path)  # port 0 = OS-assigned

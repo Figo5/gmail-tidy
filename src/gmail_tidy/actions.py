@@ -10,7 +10,7 @@ from gmail_tidy.checkpoint import RuleCheckpoint, ScanCheckpoint, config_fingerp
 from gmail_tidy.config import Actions, Config, MatchConfig
 from gmail_tidy.errors import EXIT_CANCELLED, EXIT_OK, EXIT_PARTIAL
 from gmail_tidy.gmail_client import GmailClient
-from gmail_tidy.rules import MessageMeta, first_matching_rule, is_excluded
+from gmail_tidy.rules import MessageMeta, first_matching_rule, is_excluded, is_included
 
 
 def query_from_match(match: MatchConfig) -> str:
@@ -161,7 +161,12 @@ def apply_run(client: GmailClient, config: Config, candidates: list[Candidate],
             journal.record_failure(run_id, cand.message_id, "message gone or unreadable")
             failed += 1
             continue
-        if is_excluded(config, meta):
+        if is_excluded(config, meta) or not is_included(config, meta):
+            # Re-verify the include guard at write time exactly as scan did
+            # (first_matching_rule requires is_included AND not is_excluded).
+            # A candidate whose include label/text match disappeared between
+            # scan and apply is skipped with no mailbox change and no audit
+            # entry. An empty include list remains allowed (include all).
             continue
         fresh, changed = noop_eliminate(meta, cand.actions)
         if not changed:
