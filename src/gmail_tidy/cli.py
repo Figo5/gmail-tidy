@@ -79,6 +79,26 @@ def _exit_for(err: Exception) -> int:
 
 
 @app.command()
+def web(port: int = typer.Option(8765, "--port", min=0, max=65535,
+                                 help="Port to bind on 127.0.0.1 (0 = OS-assigned; printed to stdout)."),
+        no_browser: bool = typer.Option(False, "--no-browser",
+                                        help="Skip opening the default browser.")):
+    """Serve the local loopback-only web viewer (read-only, stdlib only).
+
+    Binds strictly 127.0.0.1 — there is deliberately no --host flag. The
+    viewer reads only local run/audit/checkpoint/config data and never
+    touches Gmail, tokens beyond scope names, or client secrets. Exit codes:
+    0 clean shutdown (Ctrl-C), 1 bind/startup failure, 2 usage error.
+    """
+    import gmail_tidy.web as web_mod
+    try:
+        raise typer.Exit(web_mod.serve(port=port, no_browser=no_browser))
+    except OSError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(EXIT_RUNTIME)
+
+
+@app.command()
 def init():
     """Create the config dir + template and start read-only OAuth."""
     try:
