@@ -127,3 +127,62 @@ def test_both_match_key_spellings_accepted(tmp_path):
     c = load_config(cfg)
     assert c.exclude[0].from_contains == ["a@example.com"]
     assert c.exclude[0].labels_have == ["Work"]
+
+
+def test_unknown_category_in_rule_rejected(tmp_path):
+    cfg = _write(tmp_path,
+        "rules:\n"
+        "  - id: r1\n"
+        "    match: {category: bogus}\n"
+        "    actions: {archive: true}\n")
+    with pytest.raises(ConfigError, match="category"):
+        load_config(cfg)
+
+
+def test_unknown_category_error_lists_expected_values(tmp_path):
+    cfg = _write(tmp_path,
+        "rules:\n"
+        "  - id: r1\n"
+        "    match: {category: bogus}\n"
+        "    actions: {archive: true}\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(cfg)
+    msg = str(exc.value)
+    assert "bogus" in msg
+    assert "newsletters" in msg
+    assert "large_messages" in msg
+
+
+def test_unknown_category_in_protect_exclude_rejected(tmp_path):
+    cfg = _write(tmp_path,
+        "protect:\n"
+        "  exclude:\n"
+        "    - category: bogus\n")
+    with pytest.raises(ConfigError, match="category"):
+        load_config(cfg)
+
+
+def test_all_six_categories_accepted(tmp_path):
+    for cat in ("newsletters", "promotions", "receipts",
+                "notifications", "old_unread", "large_messages"):
+        cfg = _write(tmp_path,
+            "rules:\n"
+            f"  - id: r1\n"
+            f"    match: {{category: {cat}}}\n"
+            f"    actions: {{archive: true}}\n")
+        loaded = load_config(cfg)
+        assert loaded.rules[0].match.category == cat
+
+
+def test_category_optional_and_null_accepted(tmp_path):
+    cfg = _write(tmp_path,
+        "rules:\n"
+        "  - id: r1\n"
+        "    match: {}\n"
+        "    actions: {archive: true}\n"
+        "  - id: r2\n"
+        "    match: {category: null}\n"
+        "    actions: {archive: true}\n")
+    loaded = load_config(cfg)
+    assert loaded.rules[0].match.category is None
+    assert loaded.rules[1].match.category is None

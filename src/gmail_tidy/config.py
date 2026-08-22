@@ -30,10 +30,23 @@ PRESETS: dict[str, dict] = {
     "large_messages": {"larger_than_kb": 1024},
 }
 
+# Single source of truth for valid MatchModel.category values.
+CATEGORIES: tuple[str, ...] = tuple(PRESETS)
+
 
 class MatchModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
     category: str | None = None
+
+    @field_validator("category")
+    @classmethod
+    def _category_must_be_preset(cls, v: str | None) -> str | None:
+        if v is not None and v not in CATEGORIES:
+            raise ValueError(
+                f"category '{v}' is not a valid preset; expected one of: "
+                f"{', '.join(CATEGORIES)}"
+            )
+        return v
     from_contains: list[str] = Field(
         default=[], validation_alias=AliasChoices("from_contains", "match_from")
     )

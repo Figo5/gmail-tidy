@@ -9,11 +9,34 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from gmail_tidy.config import Config, MatchConfig, Rule
+from gmail_tidy.config import CATEGORIES, Config, MatchConfig, Rule
 
 PROTECTED_AT_RUNTIME = frozenset(
     {"IMPORTANT", "STARRED", "SPAM", "TRASH", "DRAFT", "SENT", "CHAT"}
 )
+
+# Text-probe categories: matched by scanning From/Subject for these substrings.
+# old_unread and large_messages are special cases handled in _category_hits, so
+# they intentionally have no entry here. CATEGORIES is the shared source of truth
+# for the complete set (see gmail_tidy.config); _TEXT_PROBES + special cases must
+# always cover CATEGORIES exactly.
+_TEXT_PROBES: dict[str, list[str]] = {
+    "newsletters": ["newsletter", "digest", "unsubscribe"],
+    "promotions": ["promotion", "sale", "offer", "discount"],
+    "receipts": ["receipt", "order", "invoice", "payment"],
+    "notifications": ["notification", "alert"],
+}
+
+# Every canonical category must be either probe-driven or a special case below;
+# if a preset is added to config.PRESETS this fails loudly instead of silently
+# matching nothing.
+_SPECIAL_CATEGORIES = frozenset({"old_unread", "large_messages"})
+if set(_TEXT_PROBES) | _SPECIAL_CATEGORIES != set(CATEGORIES):
+    raise RuntimeError(
+        "rules categories no longer match config.CATEGORIES: "
+        f"probes={sorted(_TEXT_PROBES)} special={sorted(_SPECIAL_CATEGORIES)} "
+        f"categories={sorted(CATEGORIES)}"
+    )
 
 
 @dataclass
@@ -39,12 +62,7 @@ def _category_hits(category: str, meta: MessageMeta) -> bool:
     if category == "large_messages":
         return meta.size_kb >= 1024
     text = f"{meta.from_header or ''} {meta.subject_header or ''}".lower()
-    probes = {
-        "newsletters": ["newsletter", "digest", "unsubscribe"],
-        "promotions": ["promotion", "sale", "offer", "discount"],
-        "receipts": ["receipt", "order", "invoice", "payment"],
-        "notifications": ["notification", "alert"],
-    }.get(category, [])
+    probes = _TEXT_PROBES.get(category, [])
     return any(p in text for p in probes)
 
 
