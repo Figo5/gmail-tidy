@@ -38,6 +38,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from gmail_tidy import __version__
 from gmail_tidy import auth as auth_mod
+from gmail_tidy import web_shell
 from gmail_tidy.audit import AuditEntry, RunJournal
 from gmail_tidy.checkpoint import checkpoint_path
 from gmail_tidy.config import ConfigError, MatchConfig, config_dir, load_config
@@ -242,10 +243,15 @@ _SHELL = None
 
 
 def _html_shell() -> bytes:
-    """Static inline HTML shell (Task 8). No user input is interpolated."""
+    """Static inline HTML shell (Task 14). Delegates to gmail_tidy.web_shell.
+
+    ``web_shell.html_shell()`` assembles the separated CSS/JS/HTML constants
+    into the full document. Cached here so repeated requests don't re-encode;
+    no user input is interpolated anywhere in the shell.
+    """
     global _SHELL
     if _SHELL is None:
-        _SHELL = _SHELL_TEXT.encode("utf-8")
+        _SHELL = web_shell.html_shell()
     return _SHELL
 
 
@@ -433,108 +439,3 @@ __all__ = [
     "AUDIT_DEFAULT_LIMIT", "AUDIT_MAX_LIMIT", "RUN_ID_RE",
 ]
 
-# The static shell is defined last so it never dominates the module top half.
-_SHELL_TEXT = """<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>gmail-tidy — local viewer</title>
-<style>
-  :root { color-scheme: light dark; }
-  body { font-family: system-ui, sans-serif; margin: 0; padding: 1.5rem; line-height: 1.45; }
-  header { display: flex; align-items: baseline; gap: .75rem; margin-bottom: 1rem; }
-  h1 { font-size: 1.2rem; margin: 0; }
-  h2 { font-size: 1rem; margin: 1.4rem 0 .5rem; }
-  table { border-collapse: collapse; width: 100%; max-width: 56rem; }
-  th, td { text-align: left; padding: .3rem .6rem; border-bottom: 1px solid #444; }
-  th { font-weight: 600; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: .75rem; max-width: 56rem; }
-  .card { border: 1px solid #444; border-radius: .4rem; padding: .6rem .8rem; }
-  .card b { display: block; font-size: 1.4rem; }
-  code { background: #222; padding: .1rem .35rem; border-radius: .25rem; }
-  .err { color: #e06c75; }
-  a { color: #61afef; }
-</style>
-</head>
-<body>
-<header>
-  <h1>gmail-tidy local viewer</h1>
-  <span id="version" class="dim"></span>
-  <a href="javascript:void(0)" id="refresh">refresh</a>
-</header>
-<section id="status"></section>
-<section>
-  <h2>Checkpoint</h2>
-  <table id="checkpoint"></table>
-</section>
-<section>
-  <h2>Rules (criteria only)</h2>
-  <table id="config"></table>
-</section>
-<section>
-  <h2>Audit summary</h2>
-  <table id="audit"></table>
-</section>
-<section>
-  <h2>Runs</h2>
-  <table id="runs"></table>
-</section>
-<section>
-  <h2>Audit log (last 200)</h2>
-  <table id="auditlog"></table>
-</section>
-<script>
-const $ = (id) => document.getElementById(id);
-async function jget(url) {
-  const r = await fetch(url, {cache: "no-store"});
-  if (!r.ok) throw new Error(url + " -> " + r.status);
-  return r.json();
-}
-function esc(s) {
-  return String(s == null ? "" : s).replace(/[&<>"]/g,
-    (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-}
-function cell(v) { return "<td>" + esc(JSON.stringify(v)) + "</td>"; }
-function rows(list) { return list.map((r) => "<tr>" + r + "</tr>").join(""); }
-async function refresh() {
-  $("refresh").textContent = "…";
-  try {
-    const st = await jget("/api/v1/status");
-    $("version").textContent = st.config_dir;
-    $("status").innerHTML = `<div class="cards">
-      <div class="card"><b>${st.runs_count}</b>runs</div>
-      <div class="card"><b>${esc(st.config_present ? (st.config_valid ? "valid" : "invalid") : "missing")}</b>config</div>
-      <div class="card"><b>${st.token_present ? "present" : "absent"}</b>token</div>
-      <div class="card"><b>${esc((st.scopes || []).length)}</b>scopes</div>
-      <div class="card"><b>${st.checkpoint_present ? "yes" : "no"}</b>checkpoint</div>
-      <div class="card"><b>${esc(st.latest_run || "—")}</b>latest run</div>
-    </div>`;
-    const ck = await jget("/api/v1/checkpoint");
-    $("checkpoint").innerHTML = `<tr><th>rule</th><th>state</th></tr>` +
-      Object.entries(ck.rules).map(([r, s]) => `<tr><td>${esc(r)}</td><td>${esc(s)}</td></tr>`).join("") +
-      `<tr><td colspan="2">fingerprint: <code>${esc(ck.fingerprint || "—")}</code></td></tr>`;
-    const cf = await jget("/api/v1/config");
-    $("config").innerHTML = `<tr><th>rule</th><th>criteria</th></tr>` +
-      (cf.rules || []).map((r) => `<tr><td>${esc(r.id)}</td><td>${esc(JSON.stringify(r.criteria))}</td></tr>`).join("");
-    const au = await jget("/api/v1/audit/summary");
-    $("audit").innerHTML = `<tr><th>by_rule</th><th>by_action</th><th>by_kind</th></tr>
-      <tr>${cell(au.by_rule)}${cell(au.by_action)}${cell(au.by_kind)}</tr>`;
-    const runs = await jget("/api/v1/runs");
-    $("runs").innerHTML = `<tr><th>run</th></tr>` +
-      (runs.runs || []).map((r) => `<tr><td>${esc(r)}</td></tr>`).join("");
-    const entries = await jget("/api/v1/audit?limit=200");
-    $("audit").innerHTML = `<tr><th>action</th><th>rule</th><th>kind</th><th>ts</th></tr>` +
-      (entries.entries || []).slice(0, 200).map((e) =>
-        `<tr>${cell(e.action)}${cell(e.rule_id)}${cell(e.kind)}${cell(Math.round(e.ts * 1000) / 1000)}</tr>`).join("");
-  } catch (err) {
-    $("status").innerHTML = `<p class="err">${esc(err.message)}</p>`;
-  }
-  $("refresh").textContent = "refresh";
-}
-$("refresh").addEventListener("click", refresh);
-refresh();
-</script>
-</body>
-</html>
-"""
