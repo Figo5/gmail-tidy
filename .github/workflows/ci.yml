@@ -24,3 +24,30 @@ jobs:
           if git ls-files | grep -Ei '(^|/)(token|client_secret).*\.json$'; then
             echo "forbidden credential file in tree"; exit 1
           fi
+
+  build-wheel:
+    # Non-editable install smoke test: proves the sdist+wheel build is
+    # self-contained (fresh venv install from the wheel only, console script
+    # and `python -m` entry point both work). Config is pointed at a throwaway
+    # temp path so the smoke run never touches real config.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install build
+        run: python -m pip install --upgrade build
+      - name: Build sdist and wheel
+        run: python -m build
+      - name: Install wheel non-editably into a fresh venv
+        run: |
+          python -m venv /tmp/gt-smoke-venv
+          /tmp/gt-smoke-venv/bin/python -m pip install --upgrade pip
+          /tmp/gt-smoke-venv/bin/python -m pip install dist/*.whl
+      - name: Smoke test gmail-tidy --help and python -m gmail_tidy --help
+        env:
+          GMAIL_TIDY_CONFIG: ${{ runner.temp }}/gmail-tidy-config
+        run: |
+          /tmp/gt-smoke-venv/bin/gmail-tidy --help
+          /tmp/gt-smoke-venv/bin/python -m gmail_tidy --help
