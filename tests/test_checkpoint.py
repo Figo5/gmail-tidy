@@ -88,3 +88,48 @@ def test_save_writes_valid_json(tmp_path):
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["config_fingerprint"] == config_fingerprint(cfg)
     assert data["rules"] == {}
+
+
+# --- exhausted field -------------------------------------------------------
+
+
+def test_rule_checkpoint_exhausted_defaults_false():
+    assert RuleCheckpoint().exhausted is False
+    assert RuleCheckpoint(page_token="tok-1").exhausted is False
+
+
+def test_save_load_roundtrip_preserves_exhausted(tmp_path):
+    cfg = _config()
+    path = tmp_path / "checkpoint.json"
+    cp = ScanCheckpoint(
+        config_fingerprint=config_fingerprint(cfg),
+        rules={
+            "r1": RuleCheckpoint(page_token=None, exhausted=True),
+            "r2": RuleCheckpoint(page_token="tok-2", exhausted=False),
+        },
+    )
+    save_checkpoint(path, cp)
+    loaded = load_checkpoint(path, cfg)
+    assert loaded.rules["r1"].page_token is None
+    assert loaded.rules["r1"].exhausted is True
+    assert loaded.rules["r2"].page_token == "tok-2"
+    assert loaded.rules["r2"].exhausted is False
+    # the raw JSON persists the exhausted field alongside page_token
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["rules"]["r1"]["exhausted"] is True
+    assert data["rules"]["r2"]["exhausted"] is False
+
+
+def test_load_old_checkpoint_without_exhausted_defaults_false(tmp_path):
+    """A checkpoint.json written before the exhausted field existed must load
+    as exhausted=False for every rule (safe backward-compat: an 'exhausted' rule
+    misreads as not-exhausted, causing a harmless re-scan, never a skip)."""
+    cfg = _config()
+    path = tmp_path / "checkpoint.json"
+    path.write_text(json.dumps({
+        "config_fingerprint": config_fingerprint(cfg),
+        "rules": {"r1": {"page_token": "tok-1"}},
+    }), encoding="utf-8")
+    loaded = load_checkpoint(path, cfg)
+    assert loaded.rules["r1"].page_token == "tok-1"
+    assert loaded.rules["r1"].exhausted is False

@@ -377,6 +377,96 @@ def test_help_exit_zero_no_network(tmp_path, monkeypatch):
         assert command in result.output
 
 
+def _config_text_two_rules() -> str:
+    return (
+        "rules:\n"
+        "  - id: r1\n"
+        "    match: {subject_contains: [alpha]}\n"
+        "    actions:\n"
+        "      add_label: [Cleanup/A]\n"
+        "      archive: true\n"
+        "  - id: r2\n"
+        "    match: {subject_contains: [beta]}\n"
+        "    actions:\n"
+        "      add_label: [Cleanup/B]\n"
+        "      archive: true\n"
+    )
+
+
+# --- scan --all ------------------------------------------------------------
+
+
+def test_scan_all_and_limit_usage_error(tmp_path, monkeypatch):
+    """--all combined with --limit is a usage error (exit 2) mentioning both flags."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter", labels={"INBOX"})
+    _mock_net(monkeypatch, api)
+    result = runner.invoke(app, ["scan", "--all", "--limit", "5"])
+    assert result.exit_code == 2
+    assert "--all" in result.output and "--limit" in result.output
+
+
+def test_scan_all_runs_and_writes_checkpoint(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter", labels={"INBOX"})
+    api.add_message("m2", subject="newsletter", labels={"INBOX"})
+    api.add_message("m3", subject="newsletter", labels={"INBOX"})
+    _mock_net(monkeypatch, api)
+    result = runner.invoke(app, ["scan", "--all"])
+    assert result.exit_code == 0
+    assert "3 candidate" in result.output
+    # the mock mailbox's label state is byte-for-byte unchanged after --all
+    assert "Cleanup/N" not in api.label_names_of("m1")
+    assert "Cleanup/N" not in api.label_names_of("m2")
+    assert "Cleanup/N" not in api.label_names_of("m3")
+    assert api.label_names_of("m1") == {"INBOX"}
+    assert api.label_names_of("m2") == {"INBOX"}
+    assert api.label_names_of("m3") == {"INBOX"}
+    # checkpoint persisted with exhausted=True for the fully-consumed rule
+    import json
+    data = json.loads((tmp_path / "checkpoint.json").read_text(encoding="utf-8"))
+    assert data["rules"]["r1"]["exhausted"] is True
+    assert data["rules"]["r1"]["page_token"] is None
+
+
+def test_scan_all_output_has_no_message_ids(tmp_path, monkeypatch):
+    """--all progress lines must never leak message ids; only rule ids + counts."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    # distinctive id that would trip any accidental id-in-output bug
+    api.add_message("SECRET-MSG-ID-1", subject="newsletter", labels={"INBOX"})
+    api.add_message("SECRET-MSG-ID-2", subject="newsletter", labels={"INBOX"})
+    _mock_net(monkeypatch, api)
+    result = runner.invoke(app, ["scan", "--all"])
+    assert result.exit_code == 0
+    assert "SECRET-MSG-ID" not in result.output
+    # but the rule id and candidate count DO appear
+    assert "r1" in result.output
+    assert "2 candidate" in result.output
+
+
+def test_scan_all_with_rules_subset(tmp_path, monkeypatch):
+    """--all --rules r1 exhausts only r1; r2's checkpoint entry stays absent."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text_two_rules(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", subject="alpha", labels={"INBOX"})
+    api.add_message("m2", subject="beta", labels={"INBOX"})
+    _mock_net(monkeypatch, api)
+    result = runner.invoke(app, ["scan", "--all", "--rules", "r1"])
+    assert result.exit_code == 0
+    assert "1 candidate" in result.output
+    import json
+    data = json.loads((tmp_path / "checkpoint.json").read_text(encoding="utf-8"))
+    assert set(data["rules"].keys()) == {"r1"}  # only r1 scanned/exhausted
+    assert data["rules"]["r1"]["exhausted"] is True
+
+
 def test_module_main_runs_help_offline():
     """`python -m gmail_tidy --help` works without a package build or OAuth."""
     env = dict(os.environ)

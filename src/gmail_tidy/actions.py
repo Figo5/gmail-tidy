@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from gmail_tidy.audit import AuditEntry, AuditLog, Candidate, RunJournal
 from gmail_tidy.checkpoint import RuleCheckpoint, ScanCheckpoint, config_fingerprint
@@ -38,13 +39,32 @@ def noop_eliminate(meta: MessageMeta, actions: Actions) -> tuple[Actions, bool]:
     return Actions(add_label=add, remove_label=remove, archive=archive), changed
 
 
+@dataclass
+class ScanStats:
+    evaluated: int = 0    # passed the rule-match check (eligible for this rule)
+    excluded: int = 0     # matched is None or another rule won (excluded/protected/not-included/other-rule)
+    noop: int = 0         # matched this rule but noop_eliminate found nothing to change
+    candidates: int = 0   # appended as a Candidate
+
+
 def scan(client: GmailClient, config: Config, limit: int | None = None,
-         checkpoint: ScanCheckpoint | None = None) -> tuple[list[Candidate], ScanCheckpoint]:
+         checkpoint: ScanCheckpoint | None = None, full: bool = False,
+         on_progress: Callable[[ScanCheckpoint, str, int], None] | None = None
+         ) -> tuple[list[Candidate], ScanCheckpoint, ScanStats]:
     """Build the candidate plan, paginating rule-by-rule with resumable state.
 
     ``limit`` is a GLOBAL target for total NEW eligible candidates across all
     rules — not a per-rule fetch cap and not a raw number of messages fetched.
     Already-labeled/no-op/excluded messages do not count toward the limit.
+
+    ``full`` (the --all path) scans to exhaustion: it paginates each rule until
+    its query returns no next page, marks that rule exhausted=True, and on later
+    --all runs skips already-exhausted rules entirely (zero fetches). ``full``
+    and ``limit`` are mutually exclusive.
+
+    ``on_progress``, when given, is called synchronously right after a rule's
+    pagination reaches exhaustion (next_tok is None), for both full and non-full
+    scans, with (checkpoint_so_far, rule_id, candidates_so_far).
 
     Pagination resumes from ``checkpoint.rules[rule.id].page_token`` if present,
     so a repeat scan makes forward progress through the mailbox instead of
@@ -57,12 +77,24 @@ def scan(client: GmailClient, config: Config, limit: int | None = None,
     Scan remains fully read-only: it never calls GmailClient.list() here, only
     list_page() (a single-page fetch), and never modifies any message.
     """
+    if full and limit is not None:
+        raise ValueError("full=True and limit are mutually exclusive")
     candidates: list[Candidate] = []
     seen: set[str] = set()
     new_cp = ScanCheckpoint(config_fingerprint=config_fingerprint(config))
+    stats = ScanStats()
     # One label index for the whole scan; scan never creates labels.
     index = client.fetch_label_index()
     for rule in config.rules:
+        if (full and checkpoint is not None and rule.id in checkpoint.rules
+                and checkpoint.rules[rule.id].exhausted):
+            # Already fully consumed by a prior --all run: skip entirely (ZERO
+            # list_page calls) and carry the prior exhausted entry forward.
+            new_cp.rules[rule.id] = RuleCheckpoint(
+                page_token=checkpoint.rules[rule.id].page_token,
+                exhausted=True,
+            )
+            continue
         tok = None
         if checkpoint is not None and rule.id in checkpoint.rules:
             tok = checkpoint.rules[rule.id].page_token
@@ -75,10 +107,15 @@ def scan(client: GmailClient, config: Config, limit: int | None = None,
                 meta = client.get_meta(msg_id, index)
                 matched = first_matching_rule(config, meta)
                 if matched is None or matched.id != rule.id:
-                    continue  # another rule won, or message excluded/not included
+                    # another rule won, or message excluded/not included/protected
+                    stats.excluded += 1
+                    continue
+                stats.evaluated += 1
                 actions, changed = noop_eliminate(meta, rule.actions)
                 if not changed:
+                    stats.noop += 1
                     continue
+                stats.candidates += 1
                 candidates.append(Candidate(
                     message_id=meta.id,
                     thread_id=meta.thread_id,
@@ -92,14 +129,18 @@ def scan(client: GmailClient, config: Config, limit: int | None = None,
                     # limit-hitting candidate), not next_tok, so the next scan
                     # re-evaluates this same page from the start.
                     new_cp.rules[rule.id] = RuleCheckpoint(page_token=tok)
-                    return candidates, new_cp
+                    return candidates, new_cp, stats
             if next_tok is None:
                 # Mailbox exhausted for this rule/query; record a clean resume
-                # point (page_token=None) and move to the next rule.
-                new_cp.rules[rule.id] = RuleCheckpoint(page_token=None)
+                # point (page_token=None). exhausted mirrors `full`: only --all
+                # may claim a rule is truly done (so a later --all re-scans a
+                # rule a plain/--limit scan merely reached the end of).
+                new_cp.rules[rule.id] = RuleCheckpoint(page_token=None, exhausted=full)
+                if on_progress is not None:
+                    on_progress(new_cp, rule.id, len(candidates))
                 break
             tok = next_tok
-    return candidates, new_cp
+    return candidates, new_cp, stats
 
 
 def apply_run(client: GmailClient, config: Config, candidates: list[Candidate],

@@ -95,10 +95,14 @@ def init():
 
 @app.command()
 def scan(limit: int | None = typer.Option(None, "--limit"),
+         all_: bool = typer.Option(False, "--all",
+                                   help="Scan the entire mailbox to exhaustion (mutually exclusive with --limit)"),
          rules: list[str] = typer.Option(None, "--rules")):
     """Build a candidate plan (read-only) and write it to the run journal."""
     try:
         cfg_dir, cfg = _load_config()
+        if all_ and limit is not None:
+            raise ConfigError("--all cannot be combined with --limit")
         if rules:
             cfg.rules = [r for r in cfg.rules if r.id in rules]
         client = _client(cfg_dir, require_write=False)
@@ -106,7 +110,19 @@ def scan(limit: int | None = typer.Option(None, "--limit"),
         # the last one left off instead of restarting at page 1.
         cp_path = checkpoint_path(cfg_dir)
         cp = load_checkpoint(cp_path, cfg)
-        candidates, new_cp = build_scan(client, cfg, limit=limit, checkpoint=cp)
+
+        def _on_progress(cp, rule_id, n_candidates):
+            # Incremental checkpoint save + progress line during a long --all
+            # run. The progress line is deliberately free of any message id,
+            # thread id, subject, sender, or body — only the rule id (a
+            # user-configured, non-sensitive string) and an integer count.
+            save_checkpoint(cp_path, cp)
+            console.print(f"[dim]rule {rule_id}: done ({n_candidates} candidates so far)[/dim]")
+
+        candidates, new_cp, _stats = build_scan(
+            client, cfg, limit=limit, checkpoint=cp, full=all_,
+            on_progress=_on_progress if all_ else None,
+        )
         # Always persist the new checkpoint — even with 0 candidates — so the
         # NEXT invocation continues past an empty page instead of re-fetching it.
         save_checkpoint(cp_path, new_cp)

@@ -22,6 +22,7 @@ from gmail_tidy.config import Config
 @dataclass
 class RuleCheckpoint:
     page_token: str | None = None
+    exhausted: bool = False
 
 
 @dataclass
@@ -56,14 +57,17 @@ def load_checkpoint(path: Path, config: Config) -> ScanCheckpoint:
         return ScanCheckpoint(config_fingerprint=fp)
     if data.get("config_fingerprint") != fp:
         return ScanCheckpoint(config_fingerprint=fp)  # config changed; start fresh
-    rules = {rid: RuleCheckpoint(page_token=r.get("page_token")) for rid, r in data.get("rules", {}).items()}
+    rules = {rid: RuleCheckpoint(page_token=r.get("page_token"),
+                                 exhausted=bool(r.get("exhausted", False)))
+             for rid, r in data.get("rules", {}).items()}
     return ScanCheckpoint(config_fingerprint=fp, rules=rules)
 
 
 def save_checkpoint(path: Path, cp: ScanCheckpoint) -> None:
     payload = {
         "config_fingerprint": cp.config_fingerprint,
-        "rules": {rid: {"page_token": r.page_token} for rid, r in cp.rules.items()},
+        "rules": {rid: {"page_token": r.page_token, "exhausted": r.exhausted}
+                  for rid, r in cp.rules.items()},
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
     if os.name != "nt":
