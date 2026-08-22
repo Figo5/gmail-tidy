@@ -235,16 +235,19 @@ The complete, audited API surface is `users.messages.list/get/batchModify`,
 ## CLI
 
 Every command talks to Gmail by design — "dry-run" means **no writes**, not no
-network.
+network. `status`, `summary`, `preview`, and `web` are the exceptions: they read
+only local run/checkpoint/config data and never contact Gmail.
 
 | Command | Behavior |
 |---|---|
+| `web [--port N] [--no-browser]` | Start the loopback-only, read-only web viewer. Stdlib only; serves only local run/audit/checkpoint/config data — never Gmail, never OAuth tokens, never client secrets. Binds strictly `127.0.0.1` (there is deliberately no host flag). `--port N` (default `8765`, range 0–65535); `--port 0` asks the OS for a random free port (printed to stdout). `--no-browser` skips opening the default browser. Exit codes: `0` clean shutdown (Ctrl-C), `1` bind/startup failure, `2` usage error |
 | `init` | Create config dir + commented template (presets disabled), start read-only OAuth |
-| `scan [--limit N] [--rules ID...]` | Build candidate plan → local run file; prints counts only. `--limit N` caps the plan at **N new eligible candidates** (not raw messages fetched). Pagination resumes from a saved checkpoint each run |
+| `scan [--limit N] [--all] [--rules ID...]` | Build candidate plan → local run file; prints counts only. `--limit N` caps the plan at **N new eligible candidates** (not raw messages fetched). `--all` scans the entire mailbox to exhaustion and is **mutually exclusive with `--limit`** (usage error, exit 2, checked before any Gmail client is built); a rule already marked exhausted in the checkpoint is skipped with zero Gmail calls, and progress is checkpointed per rule as it goes. Pagination resumes from a saved checkpoint each run |
 | `run [--limit N] [--rules ID...] [--dry-run]` | Headless single-shot scan + apply for Task Scheduler. Never opens a browser or prompts; see [Windows Task Scheduler](#windows-task-scheduler) |
-| `preview [--run ID]` | Render a run's proposed actions (dry-run, no writes) |
+| `summary [--run ID]` | Aggregate a run's plan: totals, by-rule/action/label counts, archive-vs-labels-only split, scan stats, and per-rule checkpoint state. Reads ONLY local run/checkpoint data — never contacts Gmail, so it works with no `config.yaml`, token, or credentials (same posture as `status`). Defaults to the latest run |
+| `preview [--run ID] [--compact] [--explain] [--json]` | Render a run's proposed actions (dry-run, no writes). `--compact` groups/counts by rule, never message ids; `--explain` prints each rule's match criteria from `config.yaml` instead of a run (requires `config.yaml`); `--json` emits machine-readable JSON of a run's candidates (whitelist fields only). `--compact` and `--json` conflict with each other and with `--explain` (usage error, exit 2). Plain and `--compact` previews read only the local run — no config, token, or Gmail needed |
 | `apply [--run ID] [--yes]` | Re-verify → confirm → execute in batches → journal → audit log |
-| `undo <run ID> [--apply] [--yes]` | Reverse a run's actions from its before-state snapshot. **Dry-run by default** — with no flags it prints the inverse plan and exits `0`. A write requires `--apply`: `--apply` alone prompts for confirmation (decline exits `5`), `--apply --yes` writes immediately with no prompt. `--yes` without `--apply` is a usage error (exit 2). Idempotent |
+| `undo <run ID> [--apply] [--yes] [--dry-run]` | Reverse a run's actions from its before-state snapshot. **Dry-run by default** — no flags (or the explicit `--dry-run`) prints the inverse plan and exits `0`, never writing. A write requires `--apply`: `--apply` alone prompts for confirmation (decline exits `5`), `--apply --yes` writes immediately with no prompt. `--yes` without `--apply` is a usage error (exit 2). Idempotent |
 | `status` | Account, scopes held, last run, run history, audit-log path |
 | `auth status` / `auth refresh` / `auth revoke` | Inspect / escalate (read-only → `modify` + `labels`) / revoke tokens |
 
