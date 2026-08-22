@@ -57,6 +57,51 @@ def test_remove_label_rejects_tool_labels(tmp_path):
         load_config(cfg)
 
 
+def test_add_label_rejects_system_labels(tmp_path):
+    for name in ["TRASH", "SPAM", "INBOX", "UNREAD", "STARRED"]:
+        cfg = _write(tmp_path,
+            "rules:\n"
+            "  - id: bad\n"
+            "    match: {category: promotions}\n"
+            "    actions:\n"
+            f"      add_label: [{name}]\n")
+        with pytest.raises(ConfigError, match="bad"):
+            load_config(cfg)
+
+
+def test_add_label_allows_user_labels(tmp_path):
+    cfg = _write(tmp_path,
+        "rules:\n"
+        "  - id: r1\n"
+        "    match: {category: newsletters}\n"
+        "    actions:\n"
+        "      add_label: [Cleanup/Newsletters, Work]\n")
+    cfg_obj = load_config(cfg)
+    assert cfg_obj.rules[0].actions.add_label == ["Cleanup/Newsletters", "Work"]
+
+
+def test_remove_label_rejects_unread(tmp_path):
+    cfg = _write(tmp_path,
+        "rules:\n"
+        "  - id: bad\n"
+        "    match: {category: promotions}\n"
+        "    actions:\n"
+        "      remove_label: [UNREAD]\n")
+    with pytest.raises(ConfigError, match="bad"):
+        load_config(cfg)
+
+
+def test_remove_label_allows_inbox(tmp_path):
+    cfg = _write(tmp_path,
+        "rules:\n"
+        "  - id: r1\n"
+        "    match: {category: promotions}\n"
+        "    actions:\n"
+        "      remove_label: [INBOX]\n")
+    cfg_obj = load_config(cfg)
+    assert cfg_obj.rules[0].actions.remove_label == ["INBOX"]
+
+
 def test_unknown_key_reports_error(tmp_path):
     cfg = _write(tmp_path,
         "rules:\n"

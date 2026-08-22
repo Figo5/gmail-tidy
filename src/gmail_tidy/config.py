@@ -1,6 +1,7 @@
 """YAML config loading and validation.
 
 Rules that would remove or modify protected labels fail validation (exit 2).
+Adding a system label (INBOX, UNREAD, ...) is also rejected at load time.
 Presets ship disabled (commented) in the template.
 """
 
@@ -14,6 +15,7 @@ import yaml
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from gmail_tidy.errors import ConfigError
+from gmail_tidy.labels import SYSTEM_LABELS
 
 PROTECTED_LABELS = frozenset(
     {"IMPORTANT", "STARRED", "SPAM", "TRASH", "DRAFT", "SENT", "CHAT"}
@@ -55,11 +57,21 @@ class ActionsModel(BaseModel):
     remove_label: list[str] = []
     archive: bool = False
 
+    @field_validator("add_label")
+    @classmethod
+    def _no_system_labels(cls, v: list[str]) -> list[str]:
+        for name in v:
+            if name in SYSTEM_LABELS:
+                raise ValueError(
+                    f"label '{name}' is a system label and cannot be added"
+                )
+        return v
+
     @field_validator("remove_label")
     @classmethod
     def _no_protected(cls, v: list[str]) -> list[str]:
         for name in v:
-            if name in PROTECTED_LABELS or name.startswith("Cleanup/"):
+            if name in PROTECTED_LABELS or name in {"UNREAD"} or name.startswith("Cleanup/"):
                 raise ValueError(f"label '{name}' is protected and cannot be removed")
         return v
 

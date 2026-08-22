@@ -50,6 +50,12 @@ failure model, the undo contract, and the minimal-data policy. All invariants ar
 - **Auth errors:** a `403` (expired/revoked/insufficient scope) prints a clear
   "run `gmail-tidy auth` to re-authenticate" message and exits **4**.
 - **Malformed config:** all validation errors are printed, nothing runs, exit **2**.
+  Beyond schema checks, config validation rejects dangerous label writes at load
+  time: `add_label` may name only **user** labels (any Gmail system label —
+  `INBOX`, `UNREAD`, `STARRED`, `IMPORTANT`, `SPAM`, `TRASH`, `DRAFT`, `SENT`,
+  `CHAT` — is refused), while `remove_label` may not name a protected label,
+  `UNREAD`, or any `Cleanup/*` label. `remove_label: [INBOX]` remains allowed
+  because it is the explicit form of archiving.
 
 ## Exit codes
 

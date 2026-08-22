@@ -213,7 +213,10 @@ write commands.
   the allowed Gmail surface.
 - **Protected labels are never touched:** `IMPORTANT`, `STARRED`, `SPAM`, `TRASH`,
   `DRAFT`, `SENT`, `CHAT`, and tool-created `Cleanup/*` labels can never be removed
-  or modified; a rule that names one fails config validation (exit 2).
+  or modified; a rule that names one fails config validation (exit 2). Gmail
+  **system labels** (`INBOX`, `UNREAD`, `STARRED`, ...) can also never be named in
+  `add_label` — the tool only adds **user** labels. The one exception is
+  `remove_label: [INBOX]`, which is the explicit form of archiving.
 - **Minimal data:** the audit log and run files store only IDs and label operations —
   never senders, subjects, bodies, sizes, or content.
 

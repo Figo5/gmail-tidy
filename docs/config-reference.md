@@ -35,6 +35,12 @@ rules: []                    # required-at-runtime list of rules
   `STARRED`, `SPAM`, `TRASH`, `DRAFT`, `SENT`, or `CHAT` is ineligible regardless of
   configuration. These labels can also never be named in `remove_label` — doing so is
   a config-load error (exit 2).
+- **System labels cannot be added either:** naming any Gmail system label —
+  `INBOX`, `UNREAD`, `STARRED`, `IMPORTANT`, `SPAM`, `TRASH`, `DRAFT`, `SENT`, or
+  `CHAT` — in `add_label` is also a config-load error (exit 2). The **add** surface
+  is for **user labels** (like `Cleanup/Newsletters`); the **remove** surface may
+  additionally name `INBOX`, because `remove_label: [INBOX]` is the explicit form
+  of archiving. `UNREAD` is rejected in both directions.
 - **Tool labels are protected too:** any label starting with `Cleanup/` is protected.
   `remove_label` may not name a `Cleanup/*` label, and a message already carrying one
   remains eligible for **other** rules (add/archive), but its `Cleanup/*` labels are
@@ -90,8 +96,8 @@ messages. Editing config and re-scanning is always safe (scan is read-only).
 
 | Key | Type | Meaning |
 |---|---|---|
-| `add_label` | `[string]` | Labels to add (nested names like `Cleanup/Newsletters` create `Cleanup` parent automatically on apply). |
-| `remove_label` | `[string]` | Labels to remove. **Protected labels and `Cleanup/*` are rejected at load time (exit 2).** |
+| `add_label` | `[string]` | **User** labels to add (nested names like `Cleanup/Newsletters` create `Cleanup` parent automatically on apply). **System labels (`INBOX`, `UNREAD`, `STARRED`, `IMPORTANT`, `SPAM`, `TRASH`, `DRAFT`, `SENT`, `CHAT`) are rejected at load time (exit 2).** |
+| `remove_label` | `[string]` | Labels to remove. **Protected labels, `UNREAD`, and `Cleanup/*` are rejected at load time (exit 2); `INBOX` is allowed (explicit archive).** |
 | `archive` | bool | Remove the message from INBOX (archive). |
 
 Only these two write capabilities exist: **add/remove labels** and **archive**. There
@@ -111,13 +117,24 @@ are metadata heuristics; Gmail `category:` terms narrow the candidate fetch only
 | `old_unread` | `unread: true` + `older_than_days: 90` |
 | `large_messages` | `larger_than_kb: 1024` |
 
-## Protected labels (never removed, never modified)
+## Protected and system labels (add vs. remove)
 
-`IMPORTANT` · `STARRED` · `SPAM` · `TRASH` · `DRAFT` · `SENT` · `CHAT` — plus any label
-beginning with `Cleanup/`.
+**Protected labels** — `IMPORTANT` · `STARRED` · `SPAM` · `TRASH` · `DRAFT` · `SENT` ·
+`CHAT` — plus any label beginning with `Cleanup/`. A rule that names one in
+`remove_label` fails config validation **at load time** (exit 2, with the offending
+rule id) — never at apply time.
 
-A rule that names one in `remove_label` fails config validation **at load time**
-(exit 2, with the offending rule id) — never at apply time.
+**System labels** — the same set plus `INBOX` and `UNREAD` (all of
+`INBOX` · `UNREAD` · `STARRED` · `IMPORTANT` · `SPAM` · `TRASH` · `DRAFT` · `SENT` ·
+`CHAT`). These are **always** rejected in `add_label`, because they are Gmail state,
+not user labels: you add labels to mail, not "inbox" or "read state".
+
+**The `INBOX` exception (remove only):** `remove_label: [INBOX]` is allowed — it is
+the explicit form of archiving (the `archive: true` action is shorthand for the same
+write). Adding `INBOX` to a message is always rejected.
+
+**`UNREAD` is rejected both ways:** it cannot be added (read/unread is message state,
+not a label you set) and cannot be removed (the tool never marks mail read).
 
 ## Full worked example
 
