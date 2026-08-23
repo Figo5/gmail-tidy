@@ -394,7 +394,7 @@ PAGES.overview = function (container) {
 
     var runSec = el("section");
     runSec.appendChild(el("h2", null, "Recent runs"));
-    var runIds = (runs && runs.runs) ? runs.runs.slice(0, 5).reverse() : [];
+    var runIds = (runs && runs.runs) ? runs.runs.slice(-5).reverse() : [];
     if (runIds.length) {
       runSec.appendChild(mkTable("Run ids", ["run id"],
         runIds.map(function (rid) { return [{ href: "#/run/" + rid, text: rid }]; }), 0));

@@ -177,6 +177,28 @@ def test_run_title_appends_validated_run_id():
 
 
 # ---------------------------------------------------------------------------
+# Overview "Recent runs" shows the newest five (Task 18)
+# ---------------------------------------------------------------------------
+
+
+def test_overview_recent_runs_uses_newest_five():
+    # Task 18: the overview's Recent runs table must take the LAST five run
+    # ids from the /api/v1/runs list (runs.runs is newest-first), then reverse
+    # so the newest is on top. This is distinct from the Runs view, which
+    # reverses the full list and must be left untouched.
+    js = web_shell.SHELL_JS
+    assert "runs.runs.slice(-5).reverse()" in js
+    # the Runs view keeps its full-list reversal
+    assert "data.runs.slice().reverse()" in js
+
+
+def test_no_slice_zero_five_truncation_remains():
+    # The old overview bug truncated to the FIRST five (oldest of the
+    # newest-first list). No slice(0, 5) truncation may remain anywhere.
+    assert "slice(0, 5)" not in web_shell.SHELL_JS
+
+
+# ---------------------------------------------------------------------------
 # Only allowed relative endpoints
 # ---------------------------------------------------------------------------
 
