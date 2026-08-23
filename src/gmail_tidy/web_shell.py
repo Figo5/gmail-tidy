@@ -160,6 +160,16 @@ SHELL_JS = """
 
 var VIEWS = ["overview", "runs", "run", "audit", "rules", "checkpoint",
              "setup", "privacy"];
+var TITLES = {
+  overview: "Overview",
+  runs: "Runs",
+  run: "Run",
+  audit: "Audit",
+  rules: "Rules",
+  checkpoint: "Checkpoint",
+  setup: "Setup",
+  privacy: "Privacy"
+};
 var PAGES = {};
 var API = {
   status: "/api/v1/status",
@@ -613,6 +623,11 @@ function route() {
   var t = parseHash();
   state.view = t.view;
   state.runId = t.runId;
+  var title = "gmail-tidy — " + (TITLES[t.view] || TITLES.overview);
+  if (t.view === "run" && RE_RUN.test(t.runId)) {
+    title += " — " + t.runId;
+  }
+  document.title = title;
   var section = $id("view");
   section.textContent = "";
   var links = document.querySelectorAll("nav a[data-view]");

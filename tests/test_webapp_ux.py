@@ -121,6 +121,51 @@ def test_router_handles_all_views():
 
 
 # ---------------------------------------------------------------------------
+# Per-page document titles (Task 16)
+# ---------------------------------------------------------------------------
+
+
+def test_router_sets_document_title():
+    # The router keeps the browser tab title in sync with the active view.
+    assert "document.title" in web_shell.SHELL_JS
+
+
+def test_static_html_title_stays_app_name():
+    # The static <title> in the HTML is unchanged; the JS only overrides it at
+    # route time with the same app-name + em dash prefix.
+    assert "<title>gmail-tidy — local viewer</title>" in web_shell.SHELL_HTML
+    assert "gmail-tidy — " in web_shell.SHELL_JS
+
+
+def test_titles_map_covers_all_approved_views():
+    import re as _re
+    m = _re.search(r"var TITLES\s*=\s*\{(.*?)\}\s*;", web_shell.SHELL_JS, _re.S)
+    assert m is not None, "TITLES map missing"
+    body = m.group(1)
+    for view in APPROVED_VIEWS:
+        entry = _re.search(r"^\s*" + view + r"\s*:\s*\"([^\"]+)\"", body, _re.M)
+        assert entry is not None and entry.group(1), view
+
+
+def test_title_uses_parsed_view_label_with_overview_fallback():
+    js = web_shell.SHELL_JS
+    # The title prefix is the app name + em dash, and the label comes from the
+    # parsed/validated route view; unknown hashes fall back to overview.
+    assert "gmail-tidy — " in js
+    assert "TITLES[t.view]" in js
+    assert "TITLES.overview" in js
+
+
+def test_run_title_appends_validated_run_id():
+    js = web_shell.SHELL_JS
+    # Run detail appends the 12-hex run id only inside the run branch, and
+    # only after the existing RE_RUN validation gate passes.
+    assert 't.view === "run"' in js
+    assert "RE_RUN.test(t.runId)" in js
+    assert 'title += " — "' in js
+
+
+# ---------------------------------------------------------------------------
 # Only allowed relative endpoints
 # ---------------------------------------------------------------------------
 
