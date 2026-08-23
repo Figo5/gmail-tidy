@@ -17,7 +17,8 @@ from gmail_tidy.audit import Candidate, RunJournal
 from gmail_tidy.checkpoint import config_fingerprint
 from gmail_tidy.cli import app
 from gmail_tidy.config import Actions
-from tests.mock_gmail import MockGmailApi
+from gmail_tidy.errors import AuthError, ConfigError, NoWorkError, RequestError
+from tests.mock_gmail import MockGmailApi, _GError
 
 runner = CliRunner()
 
@@ -963,3 +964,114 @@ def test_preview_explain_empty_rules_config(tmp_path, monkeypatch):
     result = runner.invoke(app, ["preview", "--explain"])
     assert result.exit_code == 0
     assert "no rules" in result.output.lower()
+
+
+# --- persistent Gmail failure -> RequestError -> clean exit 1 ----------------
+# gmail_client._execute retries 500/503 up to MAX_RETRIES then raises
+# RequestError. Before Task 28 that error escaped the command bodies' narrow
+# catch tuples and Click printed a raw traceback. These tests prove the four
+# commands catch it, print the clean red message, and exit 1 with no traceback.
+
+
+def _persistent_500(api: MockGmailApi, method: str) -> None:
+    """Make `method` fail with HTTP 500 on every call (retries exhausted)."""
+    api._handlers[method] = lambda **kw: (_ for _ in ()).throw(_GError(500, "boom"))
+
+
+def _assert_clean_request_error(result, expected_text: str = "Gmail request failed"):
+    assert result.exit_code == 1
+    # The RequestError itself must never reach Click's default handler (that
+    # would leak a raw traceback). Typer.Exit(1) surfaces as SystemExit(1) —
+    # the same shape the existing ConfigError path produces — proving the
+    # command body caught the error and converted it to the exit path.
+    assert isinstance(result.exception, SystemExit)
+    assert result.exception.code == 1
+    assert "Traceback" not in result.output
+    assert expected_text in result.output  # the clean error message
+
+
+def test_scan_persistent_gmail_failure_exits_1_no_traceback(tmp_path, monkeypatch):
+    """labels.list 500 -> fetch_label_index -> RequestError -> clean exit 1."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter", labels={"INBOX"})
+    _mock_net(monkeypatch, api)
+    _persistent_500(api, "labels.list")
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    result = runner.invoke(app, ["scan"])
+    _assert_clean_request_error(result)
+
+
+def test_run_persistent_gmail_failure_exits_1_no_traceback(tmp_path, monkeypatch):
+    """run scan path: labels.list 500 -> RequestError -> clean exit 1 (headless)."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    (tmp_path / "token.json").write_text(
+        json.dumps({
+            "token": "fake-token",
+            "refresh_token": "fake-refresh",
+            "client_id": "x",
+            "client_secret": "x",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "scopes": [
+                "https://www.googleapis.com/auth/gmail.modify",
+                "https://www.googleapis.com/auth/gmail.labels",
+            ],
+        }),
+        encoding="utf-8",
+    )
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter", labels={"INBOX"})
+    monkeypatch.setattr(cli, "build_service", lambda creds: api)
+    _persistent_500(api, "labels.list")
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    result = runner.invoke(app, ["run"])
+    _assert_clean_request_error(result)
+
+
+def test_apply_fetch_label_index_failure_exits_1_no_traceback(tmp_path, monkeypatch):
+    """apply's labels.list (fetch_label_index outside per-candidate try) -> exit 1."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter", labels={"INBOX"})
+    _mock_net(monkeypatch, api)
+    run_id = _save_run(
+        tmp_path,
+        Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True),
+                  before_labels={"INBOX"}, in_inbox=True),
+    )
+    _persistent_500(api, "labels.list")
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    result = runner.invoke(app, ["apply", "--run", run_id, "--yes"])
+    _assert_clean_request_error(result)
+
+
+def test_undo_fetch_label_index_failure_exits_1_no_traceback(tmp_path, monkeypatch):
+    """undo's labels fetch (execute_undo, before per-message guard) -> exit 1."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", labels={"Cleanup/N"})  # post-apply state
+    _mock_net(monkeypatch, api)
+    run_id = _save_run(
+        tmp_path,
+        Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True),
+                  before_labels={"INBOX"}, in_inbox=True),
+    )
+    _persistent_500(api, "labels.list")
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    result = runner.invoke(app, ["undo", run_id, "--apply", "--yes"])
+    _assert_clean_request_error(result)
+
+
+def test_exit_code_mapping_unchanged_for_existing_errors():
+    """Regression guard: _exit_for mappings for ConfigError/AuthError/NoWorkError
+    are unchanged (2/4/3) and RequestError still maps to EXIT_RUNTIME (1)."""
+    assert cli._exit_for(ConfigError("c")) == 2
+    assert cli._exit_for(AuthError("a")) == 4
+    assert cli._exit_for(NoWorkError("n")) == 3
+    assert cli._exit_for(RequestError("r")) == 1

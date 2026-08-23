@@ -24,7 +24,7 @@ from gmail_tidy.checkpoint import (
     checkpoint_path, load_checkpoint, merge_checkpoint, save_checkpoint,
 )
 from gmail_tidy.errors import (
-    AuthError, ConfigError, NoWorkError,
+    AuthError, ConfigError, NoWorkError, RequestError,
     EXIT_OK, EXIT_RUNTIME, EXIT_CONFIG, EXIT_NOOP, EXIT_AUTH, EXIT_CANCELLED, EXIT_PARTIAL,
 )
 from gmail_tidy.gmail_client import GmailClient
@@ -198,7 +198,7 @@ def scan(limit: int | None = typer.Option(None, "--limit"),
             raise typer.Exit(EXIT_NOOP)
         console.print(f"[green]scan complete[/green]: {len(candidates)} candidate(s) — run {run_id}")
         raise typer.Exit(EXIT_OK)
-    except (ConfigError, AuthError, NoWorkError) as e:
+    except (ConfigError, AuthError, NoWorkError, RequestError) as e:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(_exit_for(e))
 
@@ -243,7 +243,7 @@ def run(limit: int | None = typer.Option(None, "--limit"),
         console.print(f"[green]run complete: applied[/green]: {outcome.candidates} candidate(s) — "
                       f"run {outcome.run_id}")
         raise typer.Exit(EXIT_OK)
-    except (ConfigError, AuthError, NoWorkError) as e:
+    except (ConfigError, AuthError, NoWorkError, RequestError) as e:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(_exit_for(e))
 
@@ -426,7 +426,7 @@ def apply(run_id: str | None = typer.Option(None, "--run"),
         if result == EXIT_CANCELLED:
             console.print("cancelled.")
         raise typer.Exit(result)
-    except (ConfigError, AuthError) as e:
+    except (ConfigError, AuthError, RequestError) as e:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(_exit_for(e))
 
@@ -475,7 +475,7 @@ def undo(run_id: str,
             if result == EXIT_CANCELLED:
                 console.print("cancelled.")
             raise typer.Exit(result)
-    except (ConfigError, AuthError) as e:
+    except (ConfigError, AuthError, RequestError) as e:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(_exit_for(e))
     except FileNotFoundError as e:
