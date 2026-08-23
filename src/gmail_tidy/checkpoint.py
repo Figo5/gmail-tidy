@@ -75,3 +75,24 @@ def save_checkpoint(path: Path, cp: ScanCheckpoint) -> None:
             path.chmod(0o600)
         except OSError:
             pass
+
+
+def merge_checkpoint(prior: ScanCheckpoint | None, fresh: ScanCheckpoint) -> ScanCheckpoint:
+    """Merge prior checkpoint entries for rules NOT in ``fresh`` back into it.
+
+    A --rules-scoped scan loads its checkpoint with the FULL config (so the
+    fingerprint matches and unselected rules' resume state is not discarded),
+    then scans only the selected rules. This helper is called right before that
+    scoped checkpoint is saved: for every rule the scoped pass did NOT touch,
+    the prior entry is carried forward unchanged, so checkpoint.json after a
+    scoped scan still holds every previously-scanned rule. Rules the scoped pass
+    DID touch keep the fresh entries. ``fresh.config_fingerprint`` (the full
+    config's hash, preserved by scan) is kept. ``prior`` None is a no-op.
+    """
+    if prior is None:
+        return fresh
+    rules = dict(fresh.rules)
+    for rid, entry in prior.rules.items():
+        if rid not in rules:
+            rules[rid] = entry
+    return ScanCheckpoint(config_fingerprint=fresh.config_fingerprint, rules=rules)

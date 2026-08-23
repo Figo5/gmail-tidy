@@ -29,7 +29,9 @@ from pathlib import Path
 from gmail_tidy import audit as audit_mod
 from gmail_tidy import auth as auth_mod
 from gmail_tidy.actions import apply_run, scan as build_scan
-from gmail_tidy.checkpoint import checkpoint_path, load_checkpoint, save_checkpoint
+from gmail_tidy.checkpoint import (
+    checkpoint_path, load_checkpoint, merge_checkpoint, save_checkpoint,
+)
 from gmail_tidy.config import Config
 from gmail_tidy.errors import EXIT_OK, EXIT_PARTIAL, AuthError
 from gmail_tidy.gmail_client import GmailClient
@@ -117,14 +119,25 @@ def run_cycle(client: GmailClient, config: Config, cfg_dir: Path,
       success / partial codes (0 / 6), and an AuthError from a mid-run 403
       propagates to the caller's auth exit path.
     """
+    # Load the checkpoint with the FULL (unfiltered) config first: the
+    # checkpoint is keyed by a fingerprint of the whole config, so loading it
+    # with a --rules-filtered config would mismatch the stored fingerprint,
+    # discard every rule's resume state, and — after save — permanently drop
+    # the unselected rules' entries. Then filter config.rules to the requested
+    # subset for the scan pass itself (same semantics as the scan command's
+    # --rules filter: unknown ids are ignored).
+    prior_cp = load_checkpoint(checkpoint_path(cfg_dir), config)
     if rules:
-        # Same semantics as the `scan` command's --rules filter: keep only the
-        # named rules; unknown ids are ignored.
         config.rules = [r for r in config.rules if r.id in rules]
     journal = audit_mod.RunJournal(cfg_dir / "runs")
     cp_path = checkpoint_path(cfg_dir)
-    cp = load_checkpoint(cp_path, config)
-    candidates, new_cp, stats = build_scan(client, config, limit=limit, checkpoint=cp)
+    candidates, new_cp, stats = build_scan(client, config, limit=limit,
+                                           checkpoint=prior_cp)
+    # A --rules-scoped run scanned only the selected rules; merge the
+    # unselected rules' prior entries back in before saving, or the scoped
+    # save would permanently drop their resume state.
+    if rules:
+        new_cp = merge_checkpoint(prior_cp, new_cp)
     save_checkpoint(cp_path, new_cp)
     run_id = journal.init_run()
     journal.save_candidates(run_id, candidates)

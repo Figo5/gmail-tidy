@@ -81,7 +81,14 @@ def scan(client: GmailClient, config: Config, limit: int | None = None,
         raise ValueError("full=True and limit are mutually exclusive")
     candidates: list[Candidate] = []
     seen: set[str] = set()
-    new_cp = ScanCheckpoint(config_fingerprint=config_fingerprint(config))
+    # Prefer the loaded checkpoint's fingerprint when one was passed: the CLI
+    # and runner load checkpoints with the FULL config, so its fingerprint is
+    # the full-config hash even when `config` was filtered down to a --rules
+    # subset for this scan pass. Keeping it stable (identical to the unfiltered
+    # hash) preserves the "editing config.yaml invalidates the checkpoint"
+    # safety property for both scoped and unscoped scans.
+    fp = checkpoint.config_fingerprint if checkpoint is not None else config_fingerprint(config)
+    new_cp = ScanCheckpoint(config_fingerprint=fp)
     stats = ScanStats()
     # One label index for the whole scan; scan never creates labels.
     index = client.fetch_label_index()

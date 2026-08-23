@@ -9,6 +9,7 @@ from gmail_tidy.checkpoint import (
     ScanCheckpoint,
     config_fingerprint,
     load_checkpoint,
+    merge_checkpoint,
     save_checkpoint,
 )
 
@@ -38,6 +39,24 @@ def test_config_fingerprint_changes_with_include():
     a = config_fingerprint(_config())
     b = config_fingerprint(_config(include=["label:work"]))
     assert a != b
+
+
+def test_config_fingerprint_of_filtered_subset_differs_from_full():
+    """Invariant this fix relies on: fingerprinting a --rules-filtered config
+    yields a DIFFERENT hash than fingerprinting the full config. That is why the
+    scan/run commands must pass the FULL config into load_checkpoint /
+    config_fingerprint — loading with the filtered config would mismatch the
+    stored fingerprint and silently reset every rule's checkpoint state."""
+    full = Config(
+        rules=[
+            Rule(id="r1", match=MatchConfig(subject_contains=["alpha"]),
+                 actions=Actions(add_label=["Cleanup/A"], archive=True)),
+            Rule(id="r2", match=MatchConfig(subject_contains=["beta"]),
+                 actions=Actions(add_label=["Cleanup/B"], archive=True)),
+        ]
+    )
+    filtered = Config(rules=[full.rules[0]])  # the --rules r1 subset
+    assert config_fingerprint(filtered) != config_fingerprint(full)
 
 
 def test_load_missing_file_returns_fresh(tmp_path):
@@ -133,3 +152,44 @@ def test_load_old_checkpoint_without_exhausted_defaults_false(tmp_path):
     loaded = load_checkpoint(path, cfg)
     assert loaded.rules["r1"].page_token == "tok-1"
     assert loaded.rules["r1"].exhausted is False
+
+
+# --- merge_checkpoint (--rules scoped scan state preservation) -------------
+
+
+def test_merge_checkpoint_carries_prior_unselected_entries_forward():
+    """A scoped scan (fresh) covers only r1; r2's prior entry is carried
+    forward unchanged by the merge, keeping the saved checkpoint complete."""
+    prior = ScanCheckpoint(
+        config_fingerprint="full-fp",
+        rules={"r1": RuleCheckpoint(page_token="tok1-old", exhausted=False),
+               "r2": RuleCheckpoint(page_token="tok2", exhausted=True)},
+    )
+    fresh = ScanCheckpoint(
+        config_fingerprint="full-fp",
+        rules={"r1": RuleCheckpoint(page_token=None, exhausted=True)},
+    )
+    merged = merge_checkpoint(prior, fresh)
+    # selected rule: fresh wins
+    assert merged.rules["r1"].page_token is None
+    assert merged.rules["r1"].exhausted is True
+    # unselected rule: prior entry preserved byte-for-byte
+    assert merged.rules["r2"].page_token == "tok2"
+    assert merged.rules["r2"].exhausted is True
+    # fingerprint stays the full-config hash
+    assert merged.config_fingerprint == "full-fp"
+
+
+def test_merge_checkpoint_none_prior_is_identity():
+    fresh = ScanCheckpoint(config_fingerprint="fp",
+                           rules={"r1": RuleCheckpoint(page_token="tok1")})
+    merged = merge_checkpoint(None, fresh)
+    assert merged.rules == fresh.rules
+    assert merged.config_fingerprint == "fp"
+
+
+def test_merge_checkpoint_empty_prior_keeps_fresh_only():
+    fresh = ScanCheckpoint(config_fingerprint="fp",
+                           rules={"r1": RuleCheckpoint(page_token="tok1")})
+    merged = merge_checkpoint(ScanCheckpoint(config_fingerprint="fp"), fresh)
+    assert merged.rules == fresh.rules

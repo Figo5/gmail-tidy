@@ -10,6 +10,7 @@ from gmail_tidy.checkpoint import (
     checkpoint_path,
     config_fingerprint,
     load_checkpoint,
+    merge_checkpoint,
     save_checkpoint,
 )
 from gmail_tidy.gmail_client import GmailClient
@@ -551,3 +552,51 @@ def test_scan_all_does_not_regress_limit_semantics():
     # at the end of a rule's mailbox, only a --all (full=True) scan may record
     # exhausted=True, so a later --all run re-scans that rule for new mail.
     assert cp.rules and all(r.exhausted is False for r in cp.rules.values())
+
+
+# --- scoped (--rules) scan preserves unselected rules' checkpoint state -----
+
+
+def test_scan_scoped_merges_unselected_rules_prior_entries():
+    """A scoped scan of a filtered config with a checkpoint loaded from the FULL
+    config's fingerprint must carry the unselected rule's prior entry forward
+    (so a later save keeps every previously-scanned rule), keep the full-config
+    fingerprint, and still resume the selected rule from its own page_token."""
+    cfg = _multi_rule_config()
+    api = MockGmailApi()
+    # r2's mailbox: one already-consumed page (m1), one fresh eligible page (m2)
+    api.add_message("m1", subject="beta", labels={"INBOX"})
+    api.add_message("m2", subject="beta", labels={"INBOX"})
+    # r1's mailbox: a fresh candidate beyond page 1
+    api.add_message("a1", subject="alpha", labels={"INBOX"})
+    api.add_message("a2", subject="alpha", labels={"INBOX"})
+
+    # A prior checkpoint loaded with the FULL config fingerprint, r2 already
+    # mid-pagination (page 1 consumed -> page_token "1").
+    full_fp = config_fingerprint(cfg)
+    prior = ScanCheckpoint(
+        config_fingerprint=full_fp,
+        rules={"r2": RuleCheckpoint(page_token="1", exhausted=False)},
+    )
+    client, seen = _spy_list_page(GmailClient(api))
+
+    # The CLI filters cfg to the selected rules for the scan pass but keeps the
+    # full-config fingerprint in the checkpoint object it passes in.
+    filtered = Config(rules=[cfg.rules[0]])  # r1 only
+    cands, new_cp, _stats = scan(client, filtered, checkpoint=prior)
+    # resumes r1 from page 1 (no prior r1 entry) and finds a1, a2
+    assert {c.message_id for c in cands} == {"a1", "a2"}
+    assert seen["alpha"] == [None]
+    # scan itself only records the rules it touched; the returned checkpoint
+    # keeps the FULL-config fingerprint (not the filtered config's hash)
+    assert new_cp.config_fingerprint == full_fp
+    assert "r2" not in new_cp.rules  # unselected rule untouched by this pass
+    assert new_cp.rules["r1"].exhausted is False
+
+    # Save-time merge (done by the CLI/runner before save): the unselected
+    # rule's prior entry is carried forward and the full-config hash is kept.
+    merged = merge_checkpoint(prior, new_cp)
+    assert merged.rules["r2"].page_token == "1"
+    assert merged.rules["r2"].exhausted is False
+    assert merged.rules["r1"] == new_cp.rules["r1"]  # selected rule kept fresh
+    assert merged.config_fingerprint == full_fp

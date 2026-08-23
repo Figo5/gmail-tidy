@@ -20,7 +20,9 @@ from gmail_tidy import auth as auth_mod
 from gmail_tidy import config as config_mod
 from gmail_tidy import __version__
 from gmail_tidy.actions import apply_run, scan as build_scan  # alias: command named scan below
-from gmail_tidy.checkpoint import checkpoint_path, load_checkpoint, save_checkpoint
+from gmail_tidy.checkpoint import (
+    checkpoint_path, load_checkpoint, merge_checkpoint, save_checkpoint,
+)
 from gmail_tidy.errors import (
     AuthError, ConfigError, NoWorkError,
     EXIT_OK, EXIT_RUNTIME, EXIT_CONFIG, EXIT_NOOP, EXIT_AUTH, EXIT_CANCELLED, EXIT_PARTIAL,
@@ -150,28 +152,40 @@ def scan(limit: int | None = typer.Option(None, "--limit"),
         cfg_dir, cfg = _load_config()
         if all_ and limit is not None:
             raise ConfigError("--all cannot be combined with --limit")
+        # Load the checkpoint with the FULL (unfiltered) config: the checkpoint
+        # is keyed by a fingerprint of the whole config, so loading it with a
+        # --rules-filtered config would mismatch the stored fingerprint, discard
+        # every rule's resume state, and — after save — permanently drop the
+        # unselected rules' entries. Load against the full config first, then
+        # filter cfg.rules to the requested subset for the scan pass itself.
+        prior_cp = load_checkpoint(checkpoint_path(cfg_dir), cfg)
         if rules:
             cfg.rules = [r for r in cfg.rules if r.id in rules]
         client = _client(cfg_dir, require_write=False)
-        # Load the persisted pagination checkpoint so this scan resumes where
-        # the last one left off instead of restarting at page 1.
         cp_path = checkpoint_path(cfg_dir)
-        cp = load_checkpoint(cp_path, cfg)
 
         def _on_progress(cp, rule_id, n_candidates):
-            # Incremental checkpoint save + progress line during a long --all
+            # Incremental checkpoint save + progress print for a long --all
             # run. The progress line is deliberately free of any message id,
             # thread id, subject, sender, or body — only the rule id (a
             # user-configured, non-sensitive string) and an integer count.
-            save_checkpoint(cp_path, cp)
+            # A scoped run merges unselected rules' prior entries so an
+            # interrupted --all --rules run never leaves a checkpoint missing
+            # them; an unscoped run has nothing to merge.
+            save_checkpoint(cp_path, merge_checkpoint(prior_cp, cp) if rules else cp)
             console.print(f"[dim]rule {rule_id}: done ({n_candidates} candidates so far)[/dim]")
 
         candidates, new_cp, stats = build_scan(
-            client, cfg, limit=limit, checkpoint=cp, full=all_,
+            client, cfg, limit=limit, checkpoint=prior_cp, full=all_,
             on_progress=_on_progress if all_ else None,
         )
         # Always persist the new checkpoint — even with 0 candidates — so the
         # NEXT invocation continues past an empty page instead of re-fetching it.
+        # A --rules-scoped scan scanned only the selected rules, so merge the
+        # unselected rules' prior entries back in first; otherwise the scoped
+        # save would permanently drop their resume state.
+        if rules:
+            new_cp = merge_checkpoint(prior_cp, new_cp)
         save_checkpoint(cp_path, new_cp)
         # Always create a run file, even for 0 candidates, so preview's
         # _latest_run() never falls back to a stale already-applied run.

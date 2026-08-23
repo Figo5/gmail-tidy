@@ -13,7 +13,9 @@ import json
 from typer.testing import CliRunner
 
 from gmail_tidy import cli
+from gmail_tidy import config as config_mod
 from gmail_tidy.audit import AuditLog, RunJournal
+from gmail_tidy.checkpoint import config_fingerprint
 from gmail_tidy.cli import app
 from gmail_tidy.errors import EXIT_PARTIAL
 from gmail_tidy import runner as runner_mod
@@ -322,6 +324,51 @@ def test_run_cycle_respects_rules_filter(tmp_path, monkeypatch):
     assert "1 candidate" in result.output
     assert "Cleanup/A" in api.label_names_of("m1")
     assert "Cleanup/B" not in api.label_names_of("m2")
+
+
+def test_run_cycle_rules_subset_preserves_unselected_rules_checkpoint(tmp_path, monkeypatch):
+    """Regression: run_cycle with --rules scoping must preserve the unselected
+    rule's checkpoint entry and keep the full-config fingerprint — a scoped run
+    must never silently drop another rule's resume state. --dry-run keeps the
+    test fully read-only w.r.t. the mock mailbox (no apply)."""
+    cfg_text = (
+        "rules:\n"
+        "  - id: r1\n"
+        "    match: {subject_contains: [alpha]}\n"
+        "    actions:\n"
+        "      add_label: [Cleanup/A]\n"
+        "      archive: true\n"
+        "  - id: r2\n"
+        "    match: {subject_contains: [beta]}\n"
+        "    actions:\n"
+        "      add_label: [Cleanup/B]\n"
+        "      archive: true\n"
+    )
+    api = MockGmailApi()
+    api.add_message("a1", subject="alpha", labels={"INBOX"})
+    api.add_message("a2", subject="alpha", labels={"INBOX"})
+    api.add_message("b1", subject="beta", labels={"INBOX"})
+    api.add_message("b2", subject="beta", labels={"INBOX"})
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(cfg_text, encoding="utf-8")
+    _write_token(tmp_path)
+    monkeypatch.setattr(cli, "build_service", lambda creds: api)
+
+    # unscoped dry-run run: both rules scanned, checkpoint holds r1+r2
+    result = runner.invoke(app, ["run", "--dry-run"])
+    assert result.exit_code == 0
+    assert "4 candidate" in result.output
+    data1 = json.loads((tmp_path / "checkpoint.json").read_text(encoding="utf-8"))
+    assert set(data1["rules"].keys()) == {"r1", "r2"}
+    fp = config_fingerprint(config_mod.load_config(tmp_path / "config.yaml"))
+
+    # scoped dry-run run: r1 re-scanned, r2's prior entry preserved unchanged
+    result2 = runner.invoke(app, ["run", "--rules", "r1", "--dry-run"])
+    assert result2.exit_code == 0
+    data2 = json.loads((tmp_path / "checkpoint.json").read_text(encoding="utf-8"))
+    assert set(data2["rules"].keys()) == {"r1", "r2"}   # r2 NOT dropped
+    assert data2["rules"]["r2"] == data1["rules"]["r2"]  # r2 unchanged
+    assert data2["config_fingerprint"] == fp             # full-config hash kept
 
 
 def test_run_cycle_limit_stops_at_limit(tmp_path, monkeypatch):

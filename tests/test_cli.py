@@ -12,7 +12,9 @@ import pytest
 from typer.testing import CliRunner
 
 from gmail_tidy import cli
+from gmail_tidy import config as config_mod
 from gmail_tidy.audit import Candidate, RunJournal
+from gmail_tidy.checkpoint import config_fingerprint
 from gmail_tidy.cli import app
 from gmail_tidy.config import Actions
 from tests.mock_gmail import MockGmailApi
@@ -394,6 +396,12 @@ def _config_text_two_rules() -> str:
     )
 
 
+def _load_two_rule_config(path: Path) -> config_mod.Config:
+    """Load the two-rule config file so its FULL-config fingerprint can be
+    computed (the CLI's fingerprint-invariant these regression tests assert on)."""
+    return config_mod.load_config(path)
+
+
 # --- scan --all ------------------------------------------------------------
 
 
@@ -452,7 +460,10 @@ def test_scan_all_output_has_no_message_ids(tmp_path, monkeypatch):
 
 
 def test_scan_all_with_rules_subset(tmp_path, monkeypatch):
-    """--all --rules r1 exhausts only r1; r2's checkpoint entry stays absent."""
+    """--all --rules r1 exhausts only r1. On a FRESH scan (no prior checkpoint),
+    r2 has no state to carry forward, so the checkpoint contains only r1's entry.
+    The r2-preservation path (r2 previously scanned) is covered by
+    test_scan_all_then_rules_subset_preserves_r2_checkpoint below."""
     monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
     (tmp_path / "config.yaml").write_text(_config_text_two_rules(), encoding="utf-8")
     api = MockGmailApi()
@@ -464,8 +475,78 @@ def test_scan_all_with_rules_subset(tmp_path, monkeypatch):
     assert "1 candidate" in result.output
     import json
     data = json.loads((tmp_path / "checkpoint.json").read_text(encoding="utf-8"))
-    assert set(data["rules"].keys()) == {"r1"}  # only r1 scanned/exhausted
+    assert set(data["rules"].keys()) == {"r1"}  # only r1 scanned/exhausted (fresh scan)
     assert data["rules"]["r1"]["exhausted"] is True
+
+
+def test_scan_all_then_rules_subset_preserves_r2_checkpoint(tmp_path, monkeypatch):
+    """Regression: an unscoped --all scan produces checkpoint entries for r1+r2;
+    a later --rules r1 scan must NOT drop r2's entry or change the fingerprint.
+    r1's entry updates (a non--all scoped scan records exhausted=False), r2's
+    entry is preserved byte-for-byte, and the stored fingerprint stays the FULL
+    config's hash so a later full scan still resumes correctly."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text_two_rules(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("a1", subject="alpha", labels={"INBOX"})
+    api.add_message("a2", subject="alpha", labels={"INBOX"})
+    api.add_message("b1", subject="beta", labels={"INBOX"})
+    api.add_message("b2", subject="beta", labels={"INBOX"})
+    _mock_net(monkeypatch, api)
+
+    # full --all scan: both rules exhausted with clean (None) resume points
+    result = runner.invoke(app, ["scan", "--all"])
+    assert result.exit_code == 0
+    assert "4 candidate" in result.output
+    data1 = json.loads((tmp_path / "checkpoint.json").read_text(encoding="utf-8"))
+    assert set(data1["rules"].keys()) == {"r1", "r2"}
+    assert data1["rules"]["r1"]["exhausted"] is True
+    assert data1["rules"]["r2"]["exhausted"] is True
+    fp = config_fingerprint(_load_two_rule_config(tmp_path / "config.yaml"))
+
+    # scoped scan of r1 only: r1 re-scanned (exhausted=False again — a plain
+    # scan never records exhaustion), r2's prior entry must survive unchanged.
+    result2 = runner.invoke(app, ["scan", "--rules", "r1"])
+    assert result2.exit_code == 0
+    data2 = json.loads((tmp_path / "checkpoint.json").read_text(encoding="utf-8"))
+    assert set(data2["rules"].keys()) == {"r1", "r2"}   # r2 NOT dropped
+    assert data2["rules"]["r1"]["exhausted"] is False   # r1 updated
+    assert data2["rules"]["r2"] == data1["rules"]["r2"]  # r2 unchanged
+    assert data2["config_fingerprint"] == fp             # full-config hash kept
+    assert data2["config_fingerprint"] == data1["config_fingerprint"]
+
+
+def test_scan_rules_subset_resumes_from_prior_page_token(tmp_path, monkeypatch):
+    """Regression: a --rules-scoped scan must resume the selected rule from ITS
+    OWN prior page_token (not restart at page 1). A --limit 3 scan stops
+    mid-mailbox on page 2, persisting r1's resume token "2"; a second scoped
+    --rules r1 scan continues from there and finds only the 2 remaining
+    messages (a3,a4) — restarting at page 1 would have re-found a1,a2,a3 (3)."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text_two_rules(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("a1", subject="alpha", labels={"INBOX"})
+    api.add_message("a2", subject="alpha", labels={"INBOX"})
+    api.add_message("a3", subject="alpha", labels={"INBOX"})
+    api.add_message("a4", subject="alpha", labels={"INBOX"})
+    _mock_net(monkeypatch, api)
+
+    # scan 1 (unscoped): r1 first, limit hits on page 2 -> r1 resume token "2"
+    result = runner.invoke(app, ["scan", "--limit", "3"])
+    assert result.exit_code == 0
+    assert "3 candidate" in result.output
+    data1 = json.loads((tmp_path / "checkpoint.json").read_text(encoding="utf-8"))
+    assert data1["rules"]["r1"]["page_token"] == "2"  # resume mid-mailbox
+    fp = config_fingerprint(_load_two_rule_config(tmp_path / "config.yaml"))
+
+    # scan 2 (scoped): resumes at token "2" -> a3,a4 (2 candidates), not a1..a3
+    result2 = runner.invoke(app, ["scan", "--rules", "r1", "--limit", "3"])
+    assert result2.exit_code == 0
+    assert "2 candidate" in result2.output
+    data2 = json.loads((tmp_path / "checkpoint.json").read_text(encoding="utf-8"))
+    # r1 consumed its remaining page; fingerprint stays the full-config hash
+    assert data2["rules"]["r1"]["page_token"] is None
+    assert data2["config_fingerprint"] == fp
 
 
 def test_module_main_runs_help_offline():
