@@ -255,6 +255,14 @@ only local run/checkpoint/config data and never contact Gmail.
 do · `4` auth error · `5` cancelled by user · `6` partial success (some batches
 failed; resume with `apply`).
 
+## Web viewer
+
+`gmail-tidy web` serves a local-first, loopback-only, read-only browser view of
+your existing local run/audit/checkpoint/config data — it never contacts Gmail,
+never holds OAuth credentials, and never writes. See
+[docs/web-viewer.md](docs/web-viewer.md) for the full reference (views, API
+routes, privacy posture).
+
 ## Windows Task Scheduler
 
 You can schedule gmail-tidy to run cleanup on a timer. The dedicated `run`
@@ -336,6 +344,8 @@ prompt) — it is not something to automate.
   worked example.
 - **[docs/safety-and-privacy.md](docs/safety-and-privacy.md)** — the eight safety
   invariants, failure/backoff behavior, the undo contract, and the audit-log format.
+- **[docs/web-viewer.md](docs/web-viewer.md)** — the local loopback-only, read-only
+  web viewer: launch flags, the eight views, API routes, and its privacy posture.
 - **[SECURITY.md](SECURITY.md)** — secrets policy and how to report a vulnerability.
 
 ## Development
