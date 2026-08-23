@@ -14,8 +14,8 @@ from gmail_tidy.checkpoint import (
     save_checkpoint,
 )
 from gmail_tidy.gmail_client import GmailClient
-from gmail_tidy.errors import EXIT_OK, EXIT_CANCELLED
-from tests.mock_gmail import MockGmailApi
+from gmail_tidy.errors import EXIT_OK, EXIT_CANCELLED, EXIT_PARTIAL, AuthError
+from tests.mock_gmail import MockGmailApi, _GError
 
 
 def _config():
@@ -600,3 +600,122 @@ def test_scan_scoped_merges_unselected_rules_prior_entries():
     assert merged.rules["r2"].exhausted is False
     assert merged.rules["r1"] == new_cp.rules["r1"]  # selected rule kept fresh
     assert merged.config_fingerprint == full_fp
+
+
+# --- mid-run AuthError propagates (Task 30) --------------------------------
+# A 403 (revoked/expired token) mid-apply must propagate out of apply_run as
+# AuthError — NOT be recorded as a per-message failure that reports a
+# misleading "partial success" — so the CLI's auth exit path (exit 4) fires.
+
+
+def _apply_harness(tmp_path):
+    """Standard apply_run harness: journal + audit + fresh run_id."""
+    j = RunJournal(tmp_path / "runs")
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    run_id = j.init_run()
+    return j, audit, run_id
+
+
+def _cand(mid: str) -> Candidate:
+    return Candidate(message_id=mid, thread_id=f"t-{mid}", rule_id="r1",
+                     actions=Actions(add_label=["Cleanup/N"], archive=True),
+                     before_labels={"INBOX"}, in_inbox=True)
+
+
+def _inject_get(api, fail_at_call: int, exc):
+    """Wrap the mock's get handler to raise ``exc`` on the n-th get call."""
+    calls = {"n": 0}
+    orig = api._handlers["get"]
+
+    def flaky(**kw):
+        calls["n"] += 1
+        if calls["n"] == fail_at_call:
+            raise exc
+        return orig(**kw)
+
+    api._handlers["get"] = flaky
+
+
+def test_apply_get_meta_403_propagates_and_not_recorded(tmp_path):
+    """A 403 on get_meta mid-run (after m1 already applied) must escape
+    apply_run as AuthError — never a recorded per-message failure."""
+    api = MockGmailApi()
+    api.add_message("m1", subject="news", labels={"INBOX"})
+    api.add_message("m2", subject="news", labels={"INBOX"})
+    client = GmailClient(api)
+    j, audit, run_id = _apply_harness(tmp_path)
+    # apply_run fetches labels (labels.list) then get_meta per candidate:
+    # m1's get_meta (call 1) succeeds, m2's get_meta (call 2) hits the 403.
+    _inject_get(api, fail_at_call=2, exc=_GError(403, "denied"))
+    with pytest.raises(AuthError):
+        apply_run(client, _config(), [_cand("m1"), _cand("m2")], j, audit,
+                  run_id, confirm=lambda: True)
+    # m1 WAS applied; m2's 403 was NOT recorded as a per-message failure.
+    assert "Cleanup/N" in api.label_names_of("m1")
+    assert j.failures(run_id) == []
+
+
+def test_403_batch_modify_propagates_and_not_recorded(tmp_path):
+    """A 403 on batch_modify mid-run must raise AuthError out of apply_run,
+    not be swallowed into a partial-failure report."""
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter", labels={"INBOX"})
+    api.add_message("m2", subject="newsletter", labels={"INBOX"})
+    client = GmailClient(api)
+    j, audit, run_id = _apply_harness(tmp_path)
+    calls = {"n": 0}
+    orig = api._handlers["batchModify"]
+
+    def flaky(**kw):
+        calls["n"] += 1
+        if calls["n"] == 2:  # m2's write fails with 403 after m1 succeeded
+            raise _GError(403, "denied")
+        return orig(**kw)
+
+    api._handlers["batchModify"] = flaky
+    with pytest.raises(AuthError):
+        apply_run(client, _config(), [_cand("m1"), _cand("m2")], j, audit,
+                  run_id, confirm=lambda: True)
+    # m1 was applied; the 403 was not counted as a failure.
+    assert "Cleanup/N" in api.label_names_of("m1")
+    assert j.failures(run_id) == []
+
+
+def test_persistent_500_still_recorded_as_failure(tmp_path, monkeypatch):
+    """Regression guard: a persistent RequestError (500) is STILL swallowed
+    and recorded as a per-message failure — the AuthError re-raise must not
+    broaden to other exception types. Run completes with EXIT_PARTIAL."""
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter", labels={"INBOX"})
+    api.add_message("m2", subject="newsletter", labels={"INBOX"})
+    client = GmailClient(api)
+    j, audit, run_id = _apply_harness(tmp_path)
+    # batchModify fails 500 on every call (retries exhausted -> RequestError)
+    api._handlers["batchModify"] = lambda **kw: (_ for _ in ()).throw(_GError(500, "boom"))
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    result = apply_run(client, _config(), [_cand("m1"), _cand("m2")], j, audit,
+                       run_id, confirm=lambda: True)
+    assert result == EXIT_PARTIAL
+    # both batch writes failed and were recorded per-message
+    assert "Cleanup/N" not in api.label_names_of("m1")
+    assert "Cleanup/N" not in api.label_names_of("m2")
+    assert len(j.failures(run_id)) == 2
+
+
+def test_generic_exception_still_recorded_and_loop_continues(tmp_path):
+    """Regression guard: a non-auth failure (message gone/unreadable) is STILL
+    recorded as a failure and the loop continues — only AuthError changes."""
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter", labels={"INBOX"})
+    api.add_message("m2", subject="newsletter", labels={"INBOX"})
+    client = GmailClient(api)
+    j, audit, run_id = _apply_harness(tmp_path)
+    # m2's get_meta raises a plain RuntimeError (message genuinely unreadable)
+    _inject_get(api, fail_at_call=2, exc=RuntimeError("message gone"))
+    result = apply_run(client, _config(), [_cand("m1"), _cand("m2")], j, audit,
+                       run_id, confirm=lambda: True)
+    assert result == EXIT_PARTIAL
+    # m1 applied; m2 recorded as a failure; the loop did NOT abort.
+    assert "Cleanup/N" in api.label_names_of("m1")
+    assert len(j.failures(run_id)) == 1
+    assert j.failures(run_id)[0].startswith("m2: ")

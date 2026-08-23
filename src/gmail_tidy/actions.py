@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from gmail_tidy.audit import AuditEntry, AuditLog, Candidate, RunJournal
 from gmail_tidy.checkpoint import RuleCheckpoint, ScanCheckpoint, config_fingerprint
 from gmail_tidy.config import Actions, Config, MatchConfig
-from gmail_tidy.errors import EXIT_CANCELLED, EXIT_OK, EXIT_PARTIAL
+from gmail_tidy.errors import AuthError, EXIT_CANCELLED, EXIT_OK, EXIT_PARTIAL
 from gmail_tidy.gmail_client import GmailClient
 from gmail_tidy.rules import MessageMeta, first_matching_rule, is_excluded, is_included
 
@@ -164,6 +164,11 @@ def apply_run(client: GmailClient, config: Config, candidates: list[Candidate],
     for cand in candidates:
         try:
             meta = client.get_meta(cand.message_id, index)
+        except AuthError:
+            # A mid-run 403 (revoked/expired token) must propagate to the
+            # caller's auth exit path — not be swallowed as a per-message
+            # failure that would report a misleading "partial success".
+            raise
         except Exception:
             journal.record_failure(run_id, cand.message_id, "message gone or unreadable")
             failed += 1
@@ -197,6 +202,10 @@ def apply_run(client: GmailClient, config: Config, candidates: list[Candidate],
             continue
         try:
             client.batch_modify([meta.id], add=add_ids, remove=remove_ids)
+        except AuthError:
+            # Same as the get_meta block above: a 403 is an auth failure, not a
+            # per-message partial failure — propagate for the auth exit path.
+            raise
         except Exception as exc:
             journal.record_failure(run_id, cand.message_id, str(exc))
             failed += 1

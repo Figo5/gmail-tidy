@@ -1075,3 +1075,129 @@ def test_exit_code_mapping_unchanged_for_existing_errors():
     assert cli._exit_for(AuthError("a")) == 4
     assert cli._exit_for(NoWorkError("n")) == 3
     assert cli._exit_for(RequestError("r")) == 1
+
+
+# --- mid-run AuthError (403) -> clean exit 4 --------------------------------
+# apply_run re-raises AuthError (Task 30) so a 403 mid-run escapes the command
+# bodies and reaches the auth exit path: exit 4 + the re-authenticate message,
+# never a misleading EXIT_PARTIAL and never a raw traceback.
+
+
+def _assert_clean_auth_exit(result,
+                            expected_text: str = "run `gmail-tidy auth` to re-authenticate"):
+    assert result.exit_code == 4
+    # Typer.Exit(4) surfaces as SystemExit(4) — the same shape the RequestError
+    # path produces — proving the command body caught AuthError and converted
+    # it to the exit path rather than leaking a raw traceback.
+    assert isinstance(result.exception, SystemExit)
+    assert result.exception.code == 4
+    assert "Traceback" not in result.output
+    assert expected_text in result.output  # the clean re-authenticate message
+
+
+def _inject_403_on_get_call(api: MockGmailApi, fail_at_call: int) -> None:
+    """Make the n-th get() call raise HTTP 403 (mid-run token revocation)."""
+    calls = {"n": 0}
+    orig = api._handlers["get"]
+
+    def flaky(**kw):
+        calls["n"] += 1
+        if calls["n"] == fail_at_call:
+            raise _GError(403, "denied")
+        return orig(**kw)
+
+    api._handlers["get"] = flaky
+
+
+def test_apply_midrun_403_exits_4_no_traceback(tmp_path, monkeypatch):
+    """apply: a 403 on the second candidate's get_meta (m1 already applied)
+    must propagate to the auth exit path — exit 4, re-auth message, no partial."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter", labels={"INBOX"})
+    api.add_message("m2", subject="newsletter", labels={"INBOX"})
+    _mock_net(monkeypatch, api)
+    # both candidates live in ONE run so apply processes m1 then m2
+    j = RunJournal(tmp_path / "runs")
+    run_id = j.init_run()
+    j.save_candidates(run_id, [
+        Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True),
+                  before_labels={"INBOX"}, in_inbox=True),
+        Candidate(message_id="m2", thread_id="t2", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True),
+                  before_labels={"INBOX"}, in_inbox=True),
+    ])
+    # apply_run re-verifies each candidate via get_meta: m1 (call 1) succeeds,
+    # m2 (call 2) hits the 403.
+    _inject_403_on_get_call(api, fail_at_call=2)
+    result = runner.invoke(app, ["apply", "--run", run_id, "--yes"])
+    _assert_clean_auth_exit(result)
+    # m1 was applied before the 403 hit
+    assert "Cleanup/N" in api.label_names_of("m1")
+
+
+def test_apply_midrun_403_batch_modify_exits_4(tmp_path, monkeypatch):
+    """A 403 on batch_modify mid-apply must also propagate to exit 4."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter", labels={"INBOX"})
+    api.add_message("m2", subject="newsletter", labels={"INBOX"})
+    _mock_net(monkeypatch, api)
+    j = RunJournal(tmp_path / "runs")
+    run_id = j.init_run()
+    j.save_candidates(run_id, [
+        Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True),
+                  before_labels={"INBOX"}, in_inbox=True),
+        Candidate(message_id="m2", thread_id="t2", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True),
+                  before_labels={"INBOX"}, in_inbox=True),
+    ])
+    calls = {"n": 0}
+    orig = api._handlers["batchModify"]
+
+    def flaky(**kw):
+        calls["n"] += 1
+        if calls["n"] == 2:  # m2's write 403s after m1 succeeded
+            raise _GError(403, "denied")
+        return orig(**kw)
+
+    api._handlers["batchModify"] = flaky
+    result = runner.invoke(app, ["apply", "--run", run_id, "--yes"])
+    _assert_clean_auth_exit(result)
+    assert "Cleanup/N" in api.label_names_of("m1")
+
+
+def test_run_midrun_403_exits_4_no_traceback(tmp_path, monkeypatch):
+    """run (headless): a 403 mid-apply after scan succeeds must propagate out
+    of run_cycle's apply_run and exit 4 with the re-authenticate message."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    (tmp_path / "token.json").write_text(
+        json.dumps({
+            "token": "fake-token",
+            "refresh_token": "fake-refresh",
+            "client_id": "x",
+            "client_secret": "x",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "scopes": [
+                "https://www.googleapis.com/auth/gmail.modify",
+                "https://www.googleapis.com/auth/gmail.labels",
+            ],
+        }),
+        encoding="utf-8",
+    )
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter", labels={"INBOX"})
+    api.add_message("m2", subject="newsletter", labels={"INBOX"})
+    monkeypatch.setattr(cli, "build_service", lambda creds: api)
+    # scan re-verifies m1 (get 1), m2 (get 2); apply re-verifies m1 (get 3),
+    # m2 (get 4) -> 403 hits the apply re-verify of m2.
+    _inject_403_on_get_call(api, fail_at_call=4)
+    result = runner.invoke(app, ["run"])
+    _assert_clean_auth_exit(result)
+    # m1 was applied before the 403 hit
+    assert "Cleanup/N" in api.label_names_of("m1")
