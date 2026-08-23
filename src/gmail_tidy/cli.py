@@ -418,6 +418,17 @@ def apply(run_id: str | None = typer.Option(None, "--run"),
         if not candidates:
             console.print("run has no candidates.")
             raise typer.Exit(EXIT_NOOP)
+        # Show the proposed per-message diff before any confirmation, matching
+        # preview's id/rule/actions table. Rendered from local run data only
+        # (same columns and action_text used by preview), and printed
+        # unconditionally for both the --yes and prompt paths.
+        table = Table(title=f"Run {run_id} — proposed actions (apply)")
+        table.add_column("id")
+        table.add_column("rule")
+        table.add_column("actions")
+        for c in candidates:
+            table.add_row(c.message_id, c.rule_id, render_mod.action_text(c.actions))
+        console.print(table)
         client = _client(cfg_dir, require_write=True)  # escalate scope before any write
         audit = audit_mod.AuditLog(cfg_dir / "audit.jsonl")
         console.print(f"[yellow]{len(candidates)} message(s) will be modified.[/yellow]")

@@ -183,6 +183,95 @@ def test_apply_no_runs_exits_3(tmp_path, monkeypatch):
     assert "no run found" in result.output.lower()
 
 
+# --- apply prints the proposed diff before confirmation (Task 33) -----------
+# Interactive apply must render the same id/rule/actions table as preview
+# (via render.action_text) BEFORE asking for confirmation — for BOTH the
+# prompt path and --yes — so the user always sees exactly what will change.
+# Output must stay aggregate/privacy-safe: only message ids, rule ids, and
+# action summaries; never sender/subject/body/size/content.
+
+
+def test_apply_yes_shows_proposed_actions_table_before_executing(tmp_path, monkeypatch):
+    """--yes: the id/rule/actions table is printed before apply_run writes."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter", labels={"INBOX"})
+    _mock_net(monkeypatch, api)
+    run_id = _save_run(
+        tmp_path,
+        Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True),
+                  before_labels={"INBOX"}, in_inbox=True),
+    )
+    result = runner.invoke(app, ["apply", "--run", run_id, "--yes"])
+    assert result.exit_code == 0
+    # the proposed diff is rendered (id/rule/actions) before the write happens
+    assert "proposed" in result.output   # apply table title (word never split by wrap)
+    assert "(apply)" in result.output    # distinct from preview's "(dry-run)" title
+    assert "m1" in result.output         # message id (the table's id column)
+    assert "r1" in result.output         # rule id
+    assert "+Cleanup/N, archive" in result.output  # action summary via action_text
+    # the table precedes the "will be modified" line
+    assert result.output.index("+Cleanup/N, archive") < result.output.index("will be modified")
+    # privacy: never sender/subject/body/size/content from the mailbox
+    assert "newsletter" not in result.output            # subject
+    assert "sender@example.com" not in result.output    # sender
+    assert "size" not in result.output.lower()
+    assert "Cleanup/N" in api.label_names_of("m1")      # it really applied
+    assert "INBOX" not in api.label_names_of("m1")
+
+
+def test_apply_prompt_shows_proposed_actions_table_before_confirm(tmp_path, monkeypatch):
+    """The prompt path renders the diff BEFORE 'Proceed with apply?' appears."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter", labels={"INBOX"})
+    _mock_net(monkeypatch, api)
+    run_id = _save_run(
+        tmp_path,
+        Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True),
+                  before_labels={"INBOX"}, in_inbox=True),
+    )
+    result = runner.invoke(app, ["apply", "--run", run_id], input="n\n")
+    assert result.exit_code == 5  # decline cancels, no write
+    assert "proposed" in result.output   # apply table title (word never split by wrap)
+    assert "(apply)" in result.output    # distinct from preview's "(dry-run)" title
+    assert "+Cleanup/N, archive" in result.output
+    assert "Proceed with apply?" in result.output
+    # the diff is printed BEFORE the confirmation prompt
+    assert result.output.index("+Cleanup/N, archive") < result.output.index("Proceed with apply?")
+    assert "Cleanup/N" not in api.label_names_of("m1")  # nothing written
+
+
+def test_apply_diff_privacy_no_content(tmp_path, monkeypatch):
+    """Apply's diff prints only id/rule/action summaries — never content."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", subject="SECRET-SUBJECT", from_hdr="attacker@example.com",
+                    size_kb=123.0, labels={"INBOX"})
+    _mock_net(monkeypatch, api)
+    run_id = _save_run(
+        tmp_path,
+        Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True),
+                  before_labels={"INBOX"}, in_inbox=True),
+    )
+    result = runner.invoke(app, ["apply", "--run", run_id, "--yes"])
+    assert result.exit_code == 0
+    assert "m1" in result.output       # id column is allowed
+    assert "r1" in result.output       # rule column is allowed
+    assert "+Cleanup/N" in result.output  # action summary is allowed
+    # forbidden: sender, subject, body, size, or raw content
+    assert "SECRET-SUBJECT" not in result.output
+    assert "attacker@example.com" not in result.output
+    assert "123.0" not in result.output
+    assert "body" not in result.output.lower()
+
+
 def test_undo_dry_run_by_default_no_writes(tmp_path, monkeypatch):
     monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
     (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
