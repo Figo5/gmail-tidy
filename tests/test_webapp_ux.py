@@ -263,6 +263,73 @@ def test_checkpoint_nested_status_fetch_has_own_catch():
 
 
 # ---------------------------------------------------------------------------
+# Shared jget helper: named timeout + AbortController (Task 21)
+# ---------------------------------------------------------------------------
+
+
+def test_jget_has_named_timeout_constant():
+    # Task 21: the shared fetch helper must declare a single named constant so
+    # the timeout is reviewable and tunable in one place; every timeout
+    # reference must use the named constant, never a stray literal.
+    js = web_shell.SHELL_JS
+    assert "var FETCH_TIMEOUT_MS = 10000" in js
+    assert js.count("FETCH_TIMEOUT_MS") >= 3
+    # any other bare 10000 in the JS would be a stray timeout literal
+    assert js.count("10000") == 1
+
+
+def test_jget_wires_abortcontroller_signal_into_fetch():
+    js = web_shell.SHELL_JS
+    assert "new AbortController()" in js
+    assert "controller.signal" in js
+    # the fetch options must carry the abort signal alongside cache no-store
+    assert "cache: \"no-store\", signal: controller.signal" in js
+
+
+def test_jget_timer_aborts_after_timeout():
+    # The timer is armed with the named constant and its callback must call
+    # controller.abort(), which rejects the in-flight fetch.
+    import re as _re
+    js = web_shell.SHELL_JS
+    assert "setTimeout" in js
+    assert "controller.abort()" in js
+    m = _re.search(
+        r"setTimeout\s*\(\s*function\s*\(\)\s*\{\s*controller\.abort\(\);\s*\}\s*,\s*FETCH_TIMEOUT_MS\s*\)",
+        js, _re.S)
+    assert m is not None, "setTimeout(abort, FETCH_TIMEOUT_MS) missing"
+
+
+def test_jget_clears_timeout_on_both_settle_paths():
+    # A settled request (success, 404, or rejection) must never leave a live
+    # timer: clearTimeout must run on BOTH the fulfillment and rejection
+    # handlers of the fetch promise.
+    js = web_shell.SHELL_JS
+    assert js.count("clearTimeout") >= 2
+
+
+def test_jget_preserves_404_null_contract():
+    # Task 21 regression guard: a 404 must still resolve to null, never throw.
+    js = web_shell.SHELL_JS
+    assert 'if (r.status === 404) { return null; }' in js
+
+
+def test_jget_preserves_generic_non_ok_error():
+    # Task 21 regression guard: any other non-OK status still rejects with the
+    # existing generic message (no per-status message table added).
+    js = web_shell.SHELL_JS
+    assert 'if (!r.ok) { throw new Error("Request failed (" + r.status + ")"); }' in js
+
+
+def test_jget_timeout_rejects_with_explicit_message():
+    # On timeout the abort rejects the fetch; the jget rejection handler must
+    # convert that into a stable, explicit timeout message that flows through
+    # the existing per-view .catch(error) handlers (which render err.message).
+    js = web_shell.SHELL_JS
+    assert '"Request timed out after " + FETCH_TIMEOUT_MS' in js
+    assert "throw new Error" in js
+
+
+# ---------------------------------------------------------------------------
 # Only allowed relative endpoints
 # ---------------------------------------------------------------------------
 

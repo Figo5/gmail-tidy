@@ -185,12 +185,26 @@ var state = { view: "overview", runId: null };
 
 function $id(name) { return document.getElementById(name); }
 
+var FETCH_TIMEOUT_MS = 10000;
+
 function jget(url) {
-  return fetch(url, { cache: "no-store" }).then(function (r) {
-    if (r.status === 404) { return null; }
-    if (!r.ok) { throw new Error("Request failed (" + r.status + ")"); }
-    return r.json();
-  });
+  var controller = new AbortController();
+  var timer = setTimeout(function () { controller.abort(); },
+                         FETCH_TIMEOUT_MS);
+  return fetch(url, { cache: "no-store", signal: controller.signal })
+    .then(function (r) {
+      clearTimeout(timer);
+      if (r.status === 404) { return null; }
+      if (!r.ok) { throw new Error("Request failed (" + r.status + ")"); }
+      return r.json();
+    })
+    .catch(function (err) {
+      clearTimeout(timer);
+      if (err && err.name === "AbortError") {
+        throw new Error("Request timed out after " + FETCH_TIMEOUT_MS + "ms");
+      }
+      throw err;
+    });
 }
 
 // --- DOM building helpers (text-only; never markup) -----------------------
