@@ -64,9 +64,15 @@ SHELL_CSS = """
     list-style: none; display: flex; flex-wrap: wrap;
     gap: .25rem .5rem; margin: 0; padding: 0;
   }
-  nav a { color: #1a1a1a; text-decoration: none; padding: .2rem .4rem; }
+  nav a {
+    color: #1a1a1a; text-decoration: none; display: block;
+    min-height: 2.75rem; padding: .65rem .5rem;
+  }
   nav a:hover { text-decoration: underline; }
   nav a[aria-current] { font-weight: 700; border-bottom: 2px solid #222; }
+  a:focus-visible, button:focus-visible {
+    outline: 2px solid #0056b3; outline-offset: 2px;
+  }
   main { padding: 1rem; max-width: 72rem; margin: 0 auto; }
   h1, h2, h3 { line-height: 1.25; }
   h2 { font-size: 1.15rem; margin: 1.4rem 0 .5rem; }
@@ -115,7 +121,8 @@ SHELL_CSS = """
   }
   button {
     font: inherit; border: 1px solid #888; border-radius: .3rem;
-    padding: .3rem .7rem; background: #f0f0f0; cursor: pointer;
+    min-height: 2.75rem; padding: .4rem .8rem;
+    background: #f0f0f0; cursor: pointer;
   }
   button:hover { background: #e2e2e2; }
   @media (max-width: 640px) {
@@ -140,6 +147,7 @@ SHELL_CSS = """
     .warn { color: #d2a75e; }
     .err { color: #ff7b72; }
     button { background: #2a2a2a; color: #eee; border-color: #555; }
+    a:focus-visible, button:focus-visible { outline: 2px solid #fff; }
     .skip:focus { background: #111; }
   }
 """

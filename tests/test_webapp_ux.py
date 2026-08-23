@@ -226,6 +226,51 @@ def test_tables_have_captions_and_scoped_headers():
     assert '"row"' in js
 
 
+def test_nav_link_touch_target():
+    # Task 15: nav links are display:block so they fill the li and are the
+    # entire touch/click target (not just the text run).
+    import re as _re
+    m = _re.search(r"nav a\s*\{([^}]*)\}", web_shell.SHELL_CSS)
+    assert m is not None, "nav a rule missing"
+    assert "display: block" in m.group(1)
+
+
+def test_nav_link_and_button_min_height_2_75rem():
+    import re as _re
+    # nav link rule: 2.75rem min-height + padding so the tap target is at
+    # least 44px (the 2.75rem of line-height plus vertical padding).
+    m = _re.search(r"nav a\s*\{([^}]*)\}", web_shell.SHELL_CSS)
+    assert m is not None, "nav a rule missing"
+    assert "min-height: 2.75rem" in m.group(1)
+    assert "padding" in m.group(1)
+    # button rule: same min-height for the interactive controls.
+    m = _re.search(r"button\s*\{([^}]*)\}", web_shell.SHELL_CSS)
+    assert m is not None, "button rule missing"
+    assert "min-height: 2.75rem" in m.group(1)
+    assert "padding" in m.group(1)
+
+
+def test_focus_visible_outline_present():
+    css = web_shell.SHELL_CSS
+    assert "a:focus-visible" in css
+    assert "button:focus-visible" in css
+    assert "outline: 2px solid" in css
+    assert "outline-offset: 2px" in css
+
+
+def test_focus_visible_outline_dark_theme():
+    # The focus ring must stay visible in dark mode too, so the dark block
+    # re-declares the outline on a light background.
+    import re as _re
+    dark = _re.search(
+        r"@media \(prefers-color-scheme: dark\)\s*\{(.*)\}", web_shell.SHELL_CSS, _re.S)
+    assert dark is not None, "dark media query missing"
+    dark_block = dark.group(1)
+    assert "a:focus-visible" in dark_block
+    assert "button:focus-visible" in dark_block
+    assert "outline: 2px solid" in dark_block
+
+
 # ---------------------------------------------------------------------------
 # Privacy copy and read-only labeling
 # ---------------------------------------------------------------------------
