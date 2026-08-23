@@ -630,9 +630,12 @@ function route() {
   document.title = title;
   var section = $id("view");
   section.textContent = "";
+  // The run detail view (#/run/<id>) is not itself a nav entry; it maps onto
+  // the "runs" nav link so that link carries aria-current while viewing a run.
+  var navView = (t.view === "run") ? "runs" : t.view;
   var links = document.querySelectorAll("nav a[data-view]");
   Array.prototype.forEach.call(links, function (a) {
-    if (a.getAttribute("data-view") === t.view) { a.setAttribute("aria-current", "page"); }
+    if (a.getAttribute("data-view") === navView) { a.setAttribute("aria-current", "page"); }
     else { a.removeAttribute("aria-current"); }
   });
   var fn = PAGES[t.view] || PAGES.overview;

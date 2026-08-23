@@ -120,6 +120,17 @@ def test_router_handles_all_views():
     assert "overview" in js
 
 
+def test_run_detail_marks_runs_nav_active():
+    # Task 17: the #/run/<id> detail view maps onto the existing "runs" nav
+    # link, so the Runs link is marked aria-current even though "run" is not
+    # itself a nav entry. The router compares against a navView derived from
+    # the parsed route view.
+    js = web_shell.SHELL_JS
+    assert "navView" in js
+    assert 'navView = (t.view === "run") ? "runs" : t.view' in js
+    assert 'a.getAttribute("data-view") === navView' in js
+
+
 # ---------------------------------------------------------------------------
 # Per-page document titles (Task 16)
 # ---------------------------------------------------------------------------
