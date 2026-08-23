@@ -83,6 +83,27 @@ def _latest_run(journal: audit_mod.RunJournal) -> str | None:
     return runs[-1] if runs else None
 
 
+def _print_failures(journal: audit_mod.RunJournal, run_id: str) -> None:
+    """Read-only surface of a run's already-recorded apply failures.
+
+    Reads only what apply_run already persisted via ``RunJournal.record_failure``
+    (per-message ``{message_id, err}`` records) and prints the count plus one
+    ``message_id: reason`` line per record. Privacy boundary: these are the same
+    message ids and error strings already stored in the run journal — never
+    sender, subject, body, size, or content. Called by apply/run on EXIT_PARTIAL
+    and by summary (with a graceful ``none`` when nothing failed).
+    """
+    failures = journal.failures(run_id)
+    console.print("Failures:")
+    if not failures:
+        console.print("  none")
+        return
+    plural = "message" if len(failures) == 1 else "messages"
+    console.print(f"  {len(failures)} failed {plural}:")
+    for line in failures:
+        console.print(f"    {line}")
+
+
 def _preview_undo(run_id: str, plan) -> None:
     """Print the inverse plan (dry-run / preview path). Always exits EXIT_OK."""
     console.print(f"inverse plan for run {run_id} (dry-run):")
@@ -239,6 +260,7 @@ def run(limit: int | None = typer.Option(None, "--limit"),
         if outcome.exit_code == EXIT_PARTIAL:
             console.print(f"[yellow]run complete: partial[/yellow]: {outcome.candidates} candidate(s) "
                           f"processed, some failed — run {outcome.run_id}")
+            _print_failures(audit_mod.RunJournal(cfg_dir / "runs"), outcome.run_id)
             raise typer.Exit(EXIT_PARTIAL)
         console.print(f"[green]run complete: applied[/green]: {outcome.candidates} candidate(s) — "
                       f"run {outcome.run_id}")
@@ -324,6 +346,12 @@ def summary(run: str | None = typer.Option(None, "--run")):
             console.print(f"  excluded  : {stats.get('excluded', 0)}")
             console.print(f"  noop      : {stats.get('noop', 0)}")
             console.print(f"  candidates: {stats.get('candidates', 0)}")
+
+        # --- Failures ----------------------------------------------------
+        # Read-only surface of the run's already-recorded apply failures
+        # (message ids + error strings stored by apply_run). Always printed,
+        # with a graceful `none` when nothing failed.
+        _print_failures(journal, run_id)
 
         # --- Checkpoint --------------------------------------------------
         console.print("Checkpoint:")
@@ -436,6 +464,9 @@ def apply(run_id: str | None = typer.Option(None, "--run"),
         result = apply_run(client, cfg, candidates, journal, audit, run_id, confirm)
         if result == EXIT_CANCELLED:
             console.print("cancelled.")
+        if result == EXIT_PARTIAL:
+            # Surface the already-recorded per-message failures read-only.
+            _print_failures(journal, run_id)
         raise typer.Exit(result)
     except (ConfigError, AuthError, RequestError) as e:
         console.print(f"[red]{e}[/red]")

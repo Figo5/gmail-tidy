@@ -1317,3 +1317,126 @@ def test_run_midrun_403_exits_4_no_traceback(tmp_path, monkeypatch):
     _assert_clean_auth_exit(result)
     # m1 was applied before the 403 hit
     assert "Cleanup/N" in api.label_names_of("m1")
+
+
+# --- surface already-recorded apply failures in CLI output (Task 34) ---------
+# apply_run already persists per-message failures (get_meta / batchModify
+# errors) into RunJournal.failures() and returns EXIT_PARTIAL. Task 34 surfaces
+# those ALREADY-STORED records read-only: the apply command prints a Failures
+# section (count + each `message_id: reason` line) when the result is
+# EXIT_PARTIAL, and summary always prints the section (a graceful `none` when
+# there are no failures). Output may contain ONLY already-stored message ids
+# and error strings — never sender/subject/body/size/content.
+
+
+def _save_run_multi(tmp_path, mids) -> str:
+    """Save a run with one candidate per message id (all under rule r1)."""
+    j = RunJournal(tmp_path / "runs")
+    run_id = j.init_run()
+    j.save_candidates(run_id, [
+        Candidate(message_id=mid, thread_id=f"t-{mid}", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True),
+                  before_labels={"INBOX"}, in_inbox=True)
+        for mid in mids
+    ])
+    return run_id
+
+
+def _inject_get_nth(api, fail_at_call: int, exc: Exception) -> None:
+    """Make the n-th get() call raise a generic (non-auth) per-message error."""
+    calls = {"n": 0}
+    orig = api._handlers["get"]
+
+    def flaky(**kw):
+        calls["n"] += 1
+        if calls["n"] == fail_at_call:
+            raise exc
+        return orig(**kw)
+
+    api._handlers["get"] = flaky
+
+
+def test_apply_partial_shows_failures_section(tmp_path, monkeypatch):
+    """apply with a per-message failure: exit 6 and a Failures section printing
+    the count plus the stored message_id: reason line."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter", labels={"INBOX"})
+    api.add_message("m2", subject="newsletter", labels={"INBOX"})
+    _mock_net(monkeypatch, api)
+    run_id = _save_run_multi(tmp_path, ["m1", "m2"])
+    # apply re-verifies each candidate via get_meta: m1 (call 1) applies,
+    # m2 (call 2) raises -> recorded as 'message gone or unreadable'.
+    _inject_get_nth(api, fail_at_call=2, exc=RuntimeError("gone"))
+    result = runner.invoke(app, ["apply", "--run", run_id, "--yes"])
+    assert result.exit_code == 6  # EXIT_PARTIAL preserved
+    assert "Failures:" in result.output
+    assert "1 failed message" in result.output  # the count
+    assert "m2: message gone or unreadable" in result.output  # id: reason
+    # m1 was still applied; the failure was recorded in the journal
+    assert "Cleanup/N" in api.label_names_of("m1")
+
+
+def test_apply_partial_failures_privacy(tmp_path, monkeypatch):
+    """apply's failure output shows only stored message ids + reason strings —
+    never sender, subject, body, size, or raw content."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter", labels={"INBOX"})
+    api.add_message("m2", subject="SECRET-SUBJECT", from_hdr="attacker@example.com",
+                    size_kb=123.0, labels={"INBOX"})
+    _mock_net(monkeypatch, api)
+    run_id = _save_run_multi(tmp_path, ["m1", "m2"])
+    _inject_get_nth(api, fail_at_call=2, exc=RuntimeError("boom"))
+    result = runner.invoke(app, ["apply", "--run", run_id, "--yes"])
+    assert result.exit_code == 6
+    out = result.output
+    assert "m2: message gone or unreadable" in out  # stored error string only
+    assert "SECRET-SUBJECT" not in out
+    assert "attacker@example.com" not in out
+    assert "123.0" not in out
+    assert "size" not in out.lower()
+
+
+def test_summary_with_failures_shows_section(tmp_path, monkeypatch):
+    """summary prints the journal's stored failures: count plus message_id:
+    reason lines for every record, read-only, exit 0."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    j = RunJournal(tmp_path / "runs")
+    run_id = j.init_run()
+    j.save_candidates(run_id, [
+        Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True), in_inbox=True),
+    ])
+    j.save_stats(run_id, {"evaluated": 1, "excluded": 0, "noop": 0, "candidates": 1})
+    j.record_failure(run_id, "m1", "message gone or unreadable")
+    j.record_failure(run_id, "m9", "rate limited")
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    assert result.exit_code == 0
+    assert "Failures:" in result.output
+    assert "2 failed message" in result.output
+    assert "m1: message gone or unreadable" in result.output
+    assert "m9: rate limited" in result.output
+
+
+def test_summary_no_failures_graceful(tmp_path, monkeypatch):
+    """A run with no recorded failures: the section prints `none` and exits 0 —
+    never a crash and never a spurious message-id leak from candidates."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _save_run_with_stats(
+        tmp_path,
+        [Candidate(message_id="SECRET-MSG-ID-1", thread_id="SECRET-THREAD-ID",
+                   rule_id="r1", actions=Actions(add_label=["Cleanup"], archive=True),
+                   in_inbox=True)],
+        stats={"evaluated": 1, "excluded": 0, "noop": 0, "candidates": 1},
+    )
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    assert result.exit_code == 0
+    assert "Failures:" in result.output
+    assert "none" in result.output.lower()
+    # candidate message/thread ids stay private in summary (only stored FAILURE
+    # records are ever surfaced, and this run has none)
+    assert "SECRET-MSG-ID" not in result.output
+    assert "SECRET-THREAD-ID" not in result.output

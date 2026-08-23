@@ -250,6 +250,38 @@ def test_run_partial_failure_exits_six(tmp_path, monkeypatch):
     assert len(RunJournal(tmp_path / "runs").failures(run_id)) == 1
 
 
+def test_run_partial_shows_failures_section(tmp_path, monkeypatch):
+    """run surfaces the already-recorded failures read-only: exit 6, the
+    aggregate 'partial' status word, AND the Failures section with the count
+    plus each stored message_id: reason line."""
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter", labels={"INBOX"})
+    api.add_message("m2", subject="newsletter", labels={"INBOX"})
+    _setup(tmp_path, monkeypatch, api)
+    # Fail the 4th get() call (m2's apply re-verify) — same partial shape as
+    # the existing test, now additionally asserting the surfaced output.
+    calls = {"n": 0}
+    orig_get = api._get
+
+    def flaky_get(**params):
+        calls["n"] += 1
+        if calls["n"] == 4:
+            raise RuntimeError("gone")
+        return orig_get(**params)
+
+    api._handlers["get"] = flaky_get
+    result = runner.invoke(app, ["run"])
+    assert result.exit_code == EXIT_PARTIAL
+    assert "partial" in result.output          # status word preserved
+    assert "Failures:" in result.output        # section header
+    assert "1 failed message" in result.output  # count
+    assert "m2: message gone or unreadable" in result.output  # stored id: reason
+    # privacy: only stored message ids + error strings, never content
+    assert "newsletter" not in result.output
+    assert "sender@example.com" not in result.output
+    assert "size" not in result.output.lower()
+
+
 def test_run_audits_its_actions(tmp_path, monkeypatch):
     api = MockGmailApi()
     api.add_message("m1", subject="newsletter", labels={"INBOX"})
