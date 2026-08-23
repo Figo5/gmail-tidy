@@ -199,6 +199,35 @@ def test_no_slice_zero_five_truncation_remains():
 
 
 # ---------------------------------------------------------------------------
+# Run detail missing scan-stats state (Task 19)
+# ---------------------------------------------------------------------------
+
+
+def test_run_detail_missing_stats_shows_explicit_message():
+    # Task 19: when the run detail response has no stats object (null or
+    # undefined), the client must render an explicit "not recorded" muted
+    # message via the existing el("p", "muted", ...) helper instead of
+    # silently rendering nothing.
+    js = web_shell.SHELL_JS
+    assert "Scan stats not recorded for this run." in js
+    # the guard must distinguish null/undefined stats from a present (even if
+    # empty) stats object, so the old `data.stats || {}` mask that collapsed
+    # missing stats into an empty object must not be used.
+    assert "var stats = data.stats || {}" not in js
+    assert "data.stats === null" in js
+    assert "data.stats === undefined" in js
+
+
+def test_run_detail_preserves_stats_table_when_present():
+    # Task 19: when stats ARE present, the existing per-metric table and the
+    # candidate table rendering must be preserved unchanged.
+    js = web_shell.SHELL_JS
+    assert 'mkTable("Scan statistics"' in js
+    assert '["evaluated", "excluded", "noop", "candidates"]' in js
+    assert "data.candidates" in js
+
+
+# ---------------------------------------------------------------------------
 # Only allowed relative endpoints
 # ---------------------------------------------------------------------------
 

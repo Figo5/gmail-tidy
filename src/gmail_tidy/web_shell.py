@@ -449,13 +449,18 @@ PAGES.run = function (container, runId) {
       clearLive();
       return;
     }
-    var stats = data.stats || {};
-    var sRows = [];
-    ["evaluated", "excluded", "noop", "candidates"].forEach(function (k) {
-      if (stats[k] !== undefined && stats[k] !== null) { sRows.push([k, stats[k]]); }
-    });
-    if (sRows.length) {
-      container.appendChild(mkTable("Scan statistics", ["metric", "count"], sRows, -1));
+    var stats = data.stats;
+    if (data.stats === null || data.stats === undefined) {
+      // Task 19: explicit state for runs recorded without scan statistics.
+      container.appendChild(el("p", "muted", "Scan stats not recorded for this run."));
+    } else {
+      var sRows = [];
+      ["evaluated", "excluded", "noop", "candidates"].forEach(function (k) {
+        if (stats[k] !== undefined && stats[k] !== null) { sRows.push([k, stats[k]]); }
+      });
+      if (sRows.length) {
+        container.appendChild(mkTable("Scan statistics", ["metric", "count"], sRows, -1));
+      }
     }
     var cands = data.candidates || [];
     if (!cands.length) {
