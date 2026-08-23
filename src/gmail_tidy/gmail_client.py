@@ -35,6 +35,8 @@ class GmailClient:
                 return request.execute()
             except Exception as exc:
                 status = getattr(exc, "status", None)
+                if status is None:
+                    status = getattr(exc, "status_code", None)
                 if status in (429, 500, 503) and attempt < MAX_RETRIES:
                     attempt += 1
                     delay = min(BACKOFF_CAP, BACKOFF_BASE * (2 ** attempt))

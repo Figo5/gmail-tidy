@@ -2,7 +2,19 @@
 import pytest
 from tests.mock_gmail import MockGmailApi, _GError
 from gmail_tidy.gmail_client import GmailClient, chunked
-from gmail_tidy.errors import AuthError
+from gmail_tidy.errors import AuthError, RequestError
+
+
+class _FakeHttpError(Exception):
+    """Mimics googleapiclient.errors.HttpError, which exposes the status via a
+    ``status_code`` property (``self.resp.status``) and has NO ``.status``
+    attribute. Deliberately no ``.status`` here so the code under test must
+    resolve the status via the ``status_code`` fallback."""
+
+    def __init__(self, status_code: int, reason: str = "error"):
+        self.status_code = status_code
+        self.reason = reason
+        super().__init__(f"<HttpError {status_code} {reason!r}>")
 
 
 def test_list_pages_all():
@@ -95,6 +107,48 @@ def test_403_raises_auth_error(monkeypatch):
     monkeypatch.setattr("time.sleep", lambda s: None)
     with pytest.raises(AuthError):
         GmailClient(api).list()
+
+
+# --- real HttpError shape (status_code property, no .status attr) --------
+
+
+def test_status_code_429_is_retried_then_success(monkeypatch):
+    """The real googleapiclient HttpError exposes status via ``status_code``
+    only. A transient 429 must engage the retry loop and succeed on a later
+    attempt."""
+    api = MockGmailApi()
+    api.add_message("m1")
+    calls = {"n": 0}
+    orig = api._handlers["list"]
+
+    def flaky(**kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _FakeHttpError(429, "rate limit")
+        return orig(**kw)
+
+    api._handlers["list"] = flaky
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    assert GmailClient(api).list() == ["m1"]
+    assert calls["n"] == 2
+
+
+def test_status_code_403_raises_auth_error(monkeypatch):
+    api = MockGmailApi()
+    api._handlers["list"] = lambda **kw: (_ for _ in ()).throw(_FakeHttpError(403, "denied"))
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    with pytest.raises(AuthError):
+        GmailClient(api).list()
+
+
+def test_status_code_500_persistent_reports_real_status(monkeypatch):
+    api = MockGmailApi()
+    api._handlers["list"] = lambda **kw: (_ for _ in ()).throw(_FakeHttpError(500, "boom"))
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    with pytest.raises(RequestError) as excinfo:
+        GmailClient(api).list()
+    assert "status=500" in str(excinfo.value)
+    assert "status=None" not in str(excinfo.value)
 
 
 def test_chunked_splits_at_1000():
