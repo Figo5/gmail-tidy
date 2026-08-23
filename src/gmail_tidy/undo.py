@@ -11,7 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from gmail_tidy.audit import AuditEntry, AuditLog, Candidate
-from gmail_tidy.errors import EXIT_CANCELLED, EXIT_OK
+from gmail_tidy.errors import AuthError, EXIT_CANCELLED, EXIT_OK
 from gmail_tidy.gmail_client import GmailClient
 
 
@@ -57,7 +57,18 @@ def execute_undo(client: GmailClient, plan: list[InverseAction], audit: AuditLog
     # that cannot be resolved to an existing Gmail label ID is skipped.
     index = client.fetch_label_index()
     for inv in plan:
-        meta = client.get_meta(inv.message_id, index)
+        try:
+            meta = client.get_meta(inv.message_id, index)
+        except AuthError:
+            # A mid-undo 403 (revoked/expired token) must propagate to the
+            # caller's auth exit path — not be swallowed as a per-message
+            # skip that reports a misleading success.
+            raise
+        except Exception:
+            # Message was deleted (404) or its metadata can no longer be read:
+            # skip it — no write, no audit entry. Undo is best-effort per
+            # message; a missing message is not a run-level error.
+            continue
         if set(meta.labels) != inv.expected_labels:
             continue  # user changed the message; never clobber
         # Write boundary: resolve canonical names to Gmail label IDs.
