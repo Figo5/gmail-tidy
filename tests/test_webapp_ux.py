@@ -330,6 +330,168 @@ def test_jget_timeout_rejects_with_explicit_message():
 
 
 # ---------------------------------------------------------------------------
+# Stale async renders cannot clobber the current view (Task 22)
+# ---------------------------------------------------------------------------
+
+ASYNC_PAGES = ("overview", "runs", "run", "audit", "rules", "checkpoint")
+SYNC_PAGES = ("setup", "privacy")
+
+
+def _page_body(view):
+    """Return the body of ``PAGES.<view>`` (the part inside the braces)."""
+    import re as _re
+    m = _re.search(
+        r"PAGES\.%s\s*=\s*function\s*\(container[^)]*\)\s*\{(.*?)\n\};"
+        % view, web_shell.SHELL_JS, _re.S)
+    assert m is not None, "PAGES.%s missing" % view
+    return m.group(1)
+
+
+def test_epoch_counter_declared_at_module_scope():
+    # A single module-level counter exists, initialised to 0, and is read by a
+    # guard helper that compares it against a per-render captured start.
+    js = web_shell.SHELL_JS
+    assert "var myEpoch = 0;" in js
+    assert js.count("myEpoch = 0") == 1
+    # The helper is parameterized: a module-scope function cannot see the
+    # page-local `myEpochStart` variable, so the start must be passed in.
+    assert "function _epoch(start) { return myEpoch === start; }" in js
+    # the helper must live outside the page functions (module scope)
+    assert "_epoch" in js
+
+
+def test_epoch_helper_never_called_without_start():
+    # Static guard against the broken zero-arg helper: every guard call must
+    # pass the render-captured start. Twelve calls total (six pages, then and
+    # catch each) and none may be the bare `_epoch()` form, which would throw
+    # ReferenceError at runtime (page-local myEpochStart is not visible from
+    # module scope).
+    js = web_shell.SHELL_JS
+    assert js.count("_epoch(myEpochStart)") == 12
+    assert js.count("_epoch()") == 0
+    assert "myEpochStart" in js
+
+
+def test_route_increments_epoch_as_first_statement():
+    """route() must bump the epoch before touching any route/rendering state."""
+    import re as _re
+    js = web_shell.SHELL_JS
+    assert "myEpoch++;" in js
+    assert js.count("myEpoch++") == 1, "epoch must be bumped exactly once"
+    m = _re.search(r"function route\(\)\s*\{(.*?)\n\}", js, _re.S)
+    assert m is not None, "route() missing"
+    head = m.group(1)
+    assert "myEpoch++; // Task 22" in head
+    assert head.index("myEpoch++;") < head.index("var t = parseHash();")
+
+
+def _fetch_section(view):
+    """The async (fetch) portion of a view body: everything from its epoch
+    capture onward. The synchronous pre-fetch branch of PAGES.run (invalid run
+    id) is intentionally excluded: it renders a fixed error synchronously and
+    is not subject to stale-render protection."""
+    body = _page_body(view)
+    assert "var myEpochStart = myEpoch;" in body, view
+    return body[body.index("var myEpochStart = myEpoch;"):]
+
+
+def test_each_async_page_captures_epoch_before_mutations():
+    """Each async render captures the epoch before any of ITS async-region
+    mutations (the loading setLive included), so the stale guard protects
+    every DOM and live-region write the render performs after the fetch."""
+    for view in ASYNC_PAGES:
+        assert "var myEpochStart = myEpoch;" in _page_body(view), view
+        fetch = _fetch_section(view)
+        assert "setLive(" in fetch, view
+        # capture must come before the fetch section's own setLive (loading)
+        assert fetch.index("var myEpochStart = myEpoch;") < \
+            fetch.index("setLive("), view
+        assert "_epoch(myEpochStart)" in fetch, view
+
+
+def test_sync_pages_are_not_epoch_guarded():
+    """Setup and privacy render synchronously (no fetch); they must stay
+    untouched: no epoch capture, no guard, no async chain."""
+    for name in SYNC_PAGES:
+        body = _page_body(name)
+        assert "myEpochStart" not in body, name
+        assert "_epoch()" not in body, name
+        assert "jget(" not in body, name
+
+
+def test_async_pages_guard_then_before_any_dom_write():
+    """Each then handler checks the epoch before the container blanking; a
+    stale render returns immediately and never touches the DOM."""
+    for name in ASYNC_PAGES:
+        fetch = _fetch_section(name)
+        assert "if (!_epoch(myEpochStart)) { return; }" in fetch, name
+        # the guard must appear before the first container blanking write
+        # made inside the fetch handler chain
+        assert fetch.index("if (!_epoch(myEpochStart)) { return; }") < \
+            fetch.index('container.textContent = ""'), name
+
+
+def test_async_pages_guard_catch_before_error_ui():
+    """Each catch handler must drop stale rejections before rendering the
+    error box or toggling the live status region."""
+    for name in ASYNC_PAGES:
+        body = _page_body(name)
+        assert ".catch(function (err) {" in body, name
+        catch_tail = body.split(".catch(function (err) {", 1)[1]
+        assert "if (!_epoch(myEpochStart)) { return; }" in catch_tail, name
+        assert catch_tail.index("if (!_epoch(myEpochStart)) { return; }") < \
+            catch_tail.index("container.appendChild(errState"), name
+
+
+def test_overview_guard_precedes_each_mutation_path():
+    """The overview uses Promise.all and is the most mutation-heavy view; its
+    then guard must precede the first blanking and its catch guard must
+    precede the blanking + error rendering."""
+    body = _page_body("overview")
+    assert "Promise.all" in body
+    assert body.index("if (!_epoch(myEpochStart)) { return; }") < \
+        body.index('container.textContent = ""')
+    # both the then-guard and the catch-guard are the only guard occurrences
+    assert body.count("if (!_epoch(myEpochStart)) { return; }") == 2
+
+
+def test_checkpoint_nested_advisory_chain_preserved_byte_for_byte():
+    """Task 20's nested status fetch (its own catch, no propagation to the
+    outer handler) must be preserved exactly, unchanged by the Task 22 epoch
+    guards."""
+    assert (
+        '      jget(API.status).then(function (st) {\n'
+        '        if (st && st.config_present && !st.config_valid) {\n'
+        '          container.appendChild(notice(\n'
+        '            "config.yaml is invalid, so this checkpoint may be stale. " +\n'
+        '            "The next scan restarts from page 1.", "warn"));\n'
+        '        } else if (st && !st.config_present) {\n'
+        '          container.appendChild(notice(\n'
+        '            "config.yaml is missing; checkpoint progress cannot be trusted. " +\n'
+        '            "Run gmail-tidy init to set up.", "warn"));\n'
+        '        }\n'
+        '      }).catch(function () {\n'
+        '        // The status fetch is advisory only (stale/missing-config warning).\n'
+        '        // A rejection must not propagate to the outer handler, which blanks\n'
+        '        // the already-rendered checkpoint view.\n'
+        '      });'
+    ) in web_shell.SHELL_JS
+
+
+def test_checkpoint_outer_guard_keeps_outer_blanking():
+    """The checkpoint's OUTER then/catch handlers still blank the view (that
+    is their job); the nested advisory chain must NOT blank the view itself."""
+    body = _page_body("checkpoint")
+    assert 'container.textContent = ""' in body
+    assert ".catch(function (err" in body
+    # Isolate the nested advisory chain: from the status fetch to its own
+    # catch. It must contain no view blanking of its own.
+    inner = body.split("jget(API.status).", 1)[1]
+    inner = inner.split(".catch(function () {", 1)[0]
+    assert 'container.textContent = ""' not in inner
+
+
+# ---------------------------------------------------------------------------
 # Only allowed relative endpoints
 # ---------------------------------------------------------------------------
 

@@ -183,6 +183,12 @@ var API = {
 var RE_RUN = /^[0-9a-f]{12}$/;
 var state = { view: "overview", runId: null };
 
+// Task 22: navigation epoch. Bumped once per navigation (first statement of
+// route()); async view renders capture it at render start and drop their own
+// then/catch handlers if it has moved on, so a slow in-flight fetch can never
+// clobber the currently shown view.
+var myEpoch = 0;
+
 function $id(name) { return document.getElementById(name); }
 
 var FETCH_TIMEOUT_MS = 10000;
@@ -324,12 +330,20 @@ function errState(message, retry) {
 
 // --- view renderers (each receives its own container) ---------------------
 
+// Task 22: an async render started under an older epoch is stale; its handler
+// must bail out before touching the DOM or the live status region. The start
+// value is captured per-render inside each PAGES.* function and passed in,
+// because a module-scope helper cannot see a page-local variable.
+function _epoch(start) { return myEpoch === start; }
+
 PAGES.overview = function (container) {
+  var myEpochStart = myEpoch;
   setLive("Loading overview...", "loading");
   Promise.all([
     jget(API.status), jget(API.checkpoint), jget(API.config),
     jget(API.auditSummary), jget(API.runs)
   ]).then(function (results) {
+    if (!_epoch(myEpochStart)) { return; }
     var st = results[0]; var ck = results[1]; var cfg = results[2];
     var au = results[3]; var runs = results[4];
     container.textContent = "";
@@ -419,6 +433,7 @@ PAGES.overview = function (container) {
     container.appendChild(runSec);
     clearLive();
   }).catch(function (err) {
+    if (!_epoch(myEpochStart)) { return; }
     container.textContent = "";
     container.appendChild(errState(err.message, route));
     setLive("Could not load overview.", "error");
@@ -426,8 +441,10 @@ PAGES.overview = function (container) {
 };
 
 PAGES.runs = function (container) {
+  var myEpochStart = myEpoch;
   setLive("Loading runs...");
   jget(API.runs).then(function (data) {
+    if (!_epoch(myEpochStart)) { return; }
     container.textContent = "";
     container.appendChild(el("h2", null, "Runs"));
     var ids = (data && data.runs) ? data.runs.slice().reverse() : [];
@@ -439,6 +456,7 @@ PAGES.runs = function (container) {
     }
     clearLive();
   }).catch(function (err) {
+    if (!_epoch(myEpochStart)) { return; }
     container.textContent = "";
     container.appendChild(errState(err.message, route));
     setLive("Could not load runs.", "error");
@@ -453,8 +471,10 @@ PAGES.run = function (container, runId) {
     setLive("Invalid run id.", "error");
     return;
   }
+  var myEpochStart = myEpoch;
   setLive("Loading run details...");
   jget(API.runPrefix + runId).then(function (data) {
+    if (!_epoch(myEpochStart)) { return; }
     container.textContent = "";
     container.appendChild(el("h2", null, "Run " + runId));
     if (!data) {
@@ -492,6 +512,7 @@ PAGES.run = function (container, runId) {
     addLink(container, "#/runs", "Back to runs");
     clearLive();
   }).catch(function (err) {
+    if (!_epoch(myEpochStart)) { return; }
     container.textContent = "";
     container.appendChild(errState(err.message, route));
     setLive("Could not load run.", "error");
@@ -499,8 +520,10 @@ PAGES.run = function (container, runId) {
 };
 
 PAGES.audit = function (container) {
+  var myEpochStart = myEpoch;
   setLive("Loading audit log...");
   jget(API.audit).then(function (data) {
+    if (!_epoch(myEpochStart)) { return; }
     container.textContent = "";
     container.appendChild(el("h2", null, "Audit log"));
     var entries = (data && data.entries) ? data.entries : [];
@@ -520,6 +543,7 @@ PAGES.audit = function (container) {
     }
     clearLive();
   }).catch(function (err) {
+    if (!_epoch(myEpochStart)) { return; }
     container.textContent = "";
     container.appendChild(errState(err.message, route));
     setLive("Could not load audit log.", "error");
@@ -527,8 +551,10 @@ PAGES.audit = function (container) {
 };
 
 PAGES.rules = function (container) {
+  var myEpochStart = myEpoch;
   setLive("Loading rules...");
   jget(API.config).then(function (data) {
+    if (!_epoch(myEpochStart)) { return; }
     container.textContent = "";
     container.appendChild(el("h2", null, "Rules (criteria only)"));
     if (!data || !data.rules || !data.rules.length) {
@@ -541,6 +567,7 @@ PAGES.rules = function (container) {
     }
     clearLive();
   }).catch(function (err) {
+    if (!_epoch(myEpochStart)) { return; }
     container.textContent = "";
     container.appendChild(errState(err.message, route));
     setLive("Could not load rules.", "error");
@@ -548,8 +575,10 @@ PAGES.rules = function (container) {
 };
 
 PAGES.checkpoint = function (container) {
+  var myEpochStart = myEpoch;
   setLive("Loading checkpoint...");
   jget(API.checkpoint).then(function (ck) {
+    if (!_epoch(myEpochStart)) { return; }
     container.textContent = "";
     container.appendChild(el("h2", null, "Checkpoint"));
     if (!ck || (!ck.fingerprint && !Object.keys(ck.rules || {}).length)) {
@@ -579,6 +608,7 @@ PAGES.checkpoint = function (container) {
     }
     clearLive();
   }).catch(function (err) {
+    if (!_epoch(myEpochStart)) { return; }
     container.textContent = "";
     container.appendChild(errState(err.message, route));
     setLive("Could not load checkpoint.", "error");
@@ -643,6 +673,7 @@ function parseHash() {
   return { view: name, runId: null };
 }
 function route() {
+  myEpoch++; // Task 22: invalidate every in-flight async render from before.
   var t = parseHash();
   state.view = t.view;
   state.runId = t.runId;
