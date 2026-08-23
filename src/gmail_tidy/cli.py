@@ -429,6 +429,9 @@ def apply(run_id: str | None = typer.Option(None, "--run"),
     except (ConfigError, AuthError, RequestError) as e:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(_exit_for(e))
+    except FileNotFoundError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(EXIT_CONFIG)
 
 
 @app.command()

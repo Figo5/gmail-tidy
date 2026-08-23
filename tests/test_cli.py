@@ -156,6 +156,33 @@ def test_apply_cancel_exits_5(tmp_path, monkeypatch):
     assert "Cleanup/N" not in api.label_names_of("m1")
 
 
+def test_apply_unknown_run_exits_2_no_traceback(tmp_path, monkeypatch):
+    """A --run id with no journal file must exit 2 (config error) with the clean
+    FileNotFoundError message — never Click's raw traceback handler."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    _mock_net(monkeypatch)  # never reached: load_candidates raises first
+    result = runner.invoke(app, ["apply", "--run", "000000000000", "--yes"])
+    assert result.exit_code == 2
+    assert "not found" in result.output.lower()  # the clean FileNotFoundError text
+    assert "Traceback" not in result.output
+    # Typer.Exit(2) surfaces as SystemExit(2), proving the command body caught
+    # FileNotFoundError instead of leaking it to Click's default handler.
+    assert isinstance(result.exception, SystemExit)
+    assert result.exception.code == 2
+
+
+def test_apply_no_runs_exits_3(tmp_path, monkeypatch):
+    """No --run given and no runs exist: the separate no-op branch still exits 3
+    (EXIT_NOOP) — untouched by the unknown-run FileNotFoundError fix."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    _mock_net(monkeypatch)
+    result = runner.invoke(app, ["apply", "--yes"])
+    assert result.exit_code == 3
+    assert "no run found" in result.output.lower()
+
+
 def test_undo_dry_run_by_default_no_writes(tmp_path, monkeypatch):
     monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
     (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
