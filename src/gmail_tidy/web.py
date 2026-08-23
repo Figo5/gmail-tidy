@@ -390,6 +390,14 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(response.status)
         self.send_header("Content-Type", response.content_type)
         self.send_header("Cache-Control", "no-store")
+        # Defense-in-depth headers on every response, including the 403
+        # evil-Host gate (Task 23). No CSP: the viewer is a static shell +
+        # same-origin fetch client with no third-party resources, so a
+        # content-security-policy would add maintenance surface without
+        # reducing a real attack surface.
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Content-Length", str(len(body)))
         for key, value in response.extra_headers.items():
             self.send_header(key, value)

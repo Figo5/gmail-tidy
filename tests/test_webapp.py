@@ -437,6 +437,44 @@ def test_loopback_host_headers_serve_200(tmp_path):
         t.join(timeout=5)
 
 
+_SECURITY_HEADERS = {
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+    "referrer-policy": "no-referrer",
+}
+
+
+def test_defense_in_depth_headers_on_all_responses(tmp_path):
+    """Every response — 200 JSON, 200 HTML, and the 403 evil-Host gate —
+    carries X-Content-Type-Options: nosniff, X-Frame-Options: DENY and
+    Referrer-Policy: no-referrer over the loopback socket."""
+    info = _populate(tmp_path)
+    server = web.make_server(0, tmp_path)
+    port = server.server_address[1]
+    import threading
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    try:
+        cases = [
+            ("127.0.0.1", "/healthz", 200),       # 200 JSON
+            ("127.0.0.1", "/", 200),              # 200 HTML shell
+            ("evil.example.com", "/healthz", 403),  # 403 evil-Host gate
+        ]
+        for host, path, expected_status in cases:
+            status, headers, body = _raw_http(port, host, path=path)
+            assert status == expected_status, (host, path)
+            for name, value in _SECURITY_HEADERS.items():
+                assert headers.get(name) == value, (host, path, name)
+            # no-store/CORS/cookie behavior preserved on every response
+            assert headers["cache-control"] == "no-store", (host, path)
+            assert "access-control-allow-origin" not in headers, (host, path)
+            assert "set-cookie" not in headers, (host, path)
+    finally:
+        server.shutdown()
+        server.server_close()
+        t.join(timeout=5)
+
+
 def test_loopback_server_smoke(tmp_path):
     info = _populate(tmp_path)
     server = web.make_server(0, tmp_path)  # port 0 = OS-assigned
