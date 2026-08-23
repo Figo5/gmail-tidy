@@ -32,6 +32,56 @@ def test_journal_roundtrip_and_failures(tmp_path):
     assert run_id in j.list_runs()
 
 
+def test_failures_blank_lines_skipped(tmp_path):
+    """Blank/whitespace-only lines in .failures.jsonl are skipped, never crash."""
+    j = RunJournal(tmp_path / "runs")
+    run_id = j.init_run()
+    path = tmp_path / "runs" / f"{run_id}.failures.jsonl"
+    path.write_text(
+        '{"message_id": "m1", "err": "rate limited"}\n'
+        "\n"
+        "   \n"
+        '{"message_id": "m2", "err": "gone"}\n',
+        encoding="utf-8",
+    )
+    assert j.failures(run_id) == ["m1: rate limited", "m2: gone"]
+
+
+def test_failures_malformed_lines_skipped(tmp_path):
+    """Lines that are not valid JSON are skipped without crashing."""
+    j = RunJournal(tmp_path / "runs")
+    run_id = j.init_run()
+    j.record_failure(run_id, "m1", "rate limited")
+    path = tmp_path / "runs" / f"{run_id}.failures.jsonl"
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        + "this is not json{\n"
+        + "{broken\n"
+        + '{"message_id": "m2", "err": "gone"}\n',
+        encoding="utf-8",
+    )
+    assert j.failures(run_id) == ["m1: rate limited", "m2: gone"]
+
+
+def test_failures_partial_objects_skipped(tmp_path):
+    """Valid JSON that is not a well-formed {message_id, err} record is skipped
+    deterministically — missing keys or wrong types never crash or leak."""
+    j = RunJournal(tmp_path / "runs")
+    run_id = j.init_run()
+    path = tmp_path / "runs" / f"{run_id}.failures.jsonl"
+    path.write_text(
+        '{"message_id": "m1"}\n'                 # missing err
+        '{"err": "orphan reason"}\n'             # missing message_id
+        '{"message_id": 42, "err": "bad id"}\n'  # non-string message_id
+        '[1, 2, 3]\n'                            # not an object
+        '"just a string"\n'                      # not an object
+        '{"message_id": "m2", "err": "gone"}\n'  # the only valid record
+        '{"message_id": "m3", "err": "gone", "extra": 1}\n',
+        encoding="utf-8",
+    )
+    assert j.failures(run_id) == ["m2: gone", "m3: gone"]
+
+
 def test_save_load_stats_roundtrip_and_missing(tmp_path):
     j = RunJournal(tmp_path / "runs")
     run_id = j.init_run()

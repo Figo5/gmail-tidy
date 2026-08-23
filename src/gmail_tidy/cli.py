@@ -104,6 +104,24 @@ def _print_failures(journal: audit_mod.RunJournal, run_id: str) -> None:
         console.print(f"    {line}")
 
 
+def _failures_summary(journal: audit_mod.RunJournal, run_id: str) -> None:
+    """Aggregate-only failure surface for the headless `run` command.
+
+    ``run`` output is contractually aggregate-only (see
+    docs/safety-and-privacy.md and README's "Log-output privacy"): it never
+    prints message/thread ids or content, so per-message failure records stay
+    available only through the local run journal (a diagnostic/audit
+    mechanism). This helper prints just the recorded count, with a graceful
+    ``no recorded failures`` when the run journal holds no valid records.
+    """
+    failures = journal.failures(run_id)
+    if failures:
+        console.print(f"{len(failures)} recorded failure(s) — see the run journal "
+                      "for per-message detail")
+    else:
+        console.print("no recorded failures")
+
+
 def _preview_undo(run_id: str, plan) -> None:
     """Print the inverse plan (dry-run / preview path). Always exits EXIT_OK."""
     console.print(f"inverse plan for run {run_id} (dry-run):")
@@ -260,7 +278,10 @@ def run(limit: int | None = typer.Option(None, "--limit"),
         if outcome.exit_code == EXIT_PARTIAL:
             console.print(f"[yellow]run complete: partial[/yellow]: {outcome.candidates} candidate(s) "
                           f"processed, some failed — run {outcome.run_id}")
-            _print_failures(audit_mod.RunJournal(cfg_dir / "runs"), outcome.run_id)
+            # Aggregate-only failure surface: scheduled output must never leak
+            # message ids (docs/safety-and-privacy.md "Output is aggregate-only").
+            # Per-message detail stays in the local run journal.
+            _failures_summary(audit_mod.RunJournal(cfg_dir / "runs"), outcome.run_id)
             raise typer.Exit(EXIT_PARTIAL)
         console.print(f"[green]run complete: applied[/green]: {outcome.candidates} candidate(s) — "
                       f"run {outcome.run_id}")

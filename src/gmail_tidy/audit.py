@@ -135,11 +135,34 @@ class RunJournal:
             fh.write(json.dumps({"message_id": message_id, "err": err}) + "\n")
 
     def failures(self, run_id: str) -> list[str]:
+        """Read a run's recorded per-message failures as ``message_id: err`` lines.
+
+        Defensively skips blank lines and lines that are not valid
+        ``{"message_id": str, "err": str}`` records (malformed JSON, missing or
+        non-string keys, non-objects) — a corrupted ``.failures.jsonl`` must
+        never crash summary/apply/run and never surface partial data. The
+        remaining valid records are returned in file order.
+        """
         path = self.dir / f"{run_id}.failures.jsonl"
         if not path.exists():
             return []
+        out: list[str] = []
         with open(path, encoding="utf-8") as fh:
-            return [f"{json.loads(line)['message_id']}: {json.loads(line)['err']}" for line in fh]
+            for line in fh:
+                if not line.strip():
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (ValueError, TypeError):  # JSONDecodeError and malformed input
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                mid = rec.get("message_id")
+                err = rec.get("err")
+                if not isinstance(mid, str) or not isinstance(err, str):
+                    continue
+                out.append(f"{mid}: {err}")
+        return out
 
     def list_runs(self) -> list[str]:
         if not self.dir.exists():

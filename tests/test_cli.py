@@ -1440,3 +1440,33 @@ def test_summary_no_failures_graceful(tmp_path, monkeypatch):
     # records are ever surfaced, and this run has none)
     assert "SECRET-MSG-ID" not in result.output
     assert "SECRET-THREAD-ID" not in result.output
+
+
+def test_summary_malformed_failures_does_not_crash(tmp_path, monkeypatch):
+    """summary must not crash on malformed/blank/partially-valid failure lines:
+    it aggregates the recoverable records and reports the unusable count."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    j = RunJournal(tmp_path / "runs")
+    run_id = j.init_run()
+    j.save_candidates(run_id, [
+        Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True), in_inbox=True),
+    ])
+    j.save_stats(run_id, {"evaluated": 1, "excluded": 0, "noop": 0, "candidates": 1})
+    path = tmp_path / "runs" / f"{run_id}.failures.jsonl"
+    path.write_text(
+        '{"message_id": "m1", "err": "rate limited"}\n'
+        "\n"                                        # blank line
+        "{not json at all\n"                        # malformed line
+        '{"message_id": "m2", "err": "gone"}\n',   # valid record
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    assert result.exit_code == 0          # never a crash (no traceback/exit 1)
+    out = result.output
+    assert "Failures:" in out
+    assert "2 failed messages" in out      # the two recoverable records counted
+    assert "m1: rate limited" in out
+    assert "m2: gone" in out
+    assert "Traceback" not in out
+    assert "JSONDecodeError" not in out
