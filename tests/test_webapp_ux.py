@@ -228,6 +228,41 @@ def test_run_detail_preserves_stats_table_when_present():
 
 
 # ---------------------------------------------------------------------------
+# Checkpoint nested status fetch has its own catch (Task 20)
+# ---------------------------------------------------------------------------
+
+
+def test_checkpoint_nested_status_fetch_has_own_catch():
+    # Task 20: PAGES.checkpoint fires a second, advisory jget(API.status)
+    # fetch to warn when config.yaml is missing or invalid. That nested chain
+    # must terminate with its OWN .catch: a status-fetch rejection is
+    # advisory-only and must NOT propagate to the outer error handler, which
+    # blanks the already-rendered checkpoint view (container.textContent = "").
+    import re as _re
+    js = web_shell.SHELL_JS
+    body = _re.search(
+        r"PAGES\.checkpoint\s*=\s*function\s*\(container\)\s*\{(.*?)\n\};",
+        js, _re.S).group(1)
+    # Cut the body at the outer (view-blanking) catch handler so the regex
+    # below can only match a .catch attached to the nested status fetch
+    # itself, never the outer one.
+    prefix = body.split(".catch(function (err", 1)[0]
+    m = _re.search(
+        r"jget\(API\.status\)\.then\(function\s*\(st\)\s*\{.*?\}\)"
+        r"\s*\.catch\s*\(function\s*\(\)\s*\{(.*?)\}\s*\)\s*;",
+        prefix, _re.S)
+    assert m is not None, (
+        "the nested advisory status fetch must carry its own .catch() so a "
+        "rejection does not blank the checkpoint view")
+    catch_body = m.group(1)
+    # The nested catch must not itself blank the view (that is the outer
+    # handler's job), and the outer error handler must still be in place.
+    assert 'container.textContent = ""' not in catch_body
+    assert 'container.textContent = ""' in body
+    assert ".catch(function (err" in body
+
+
+# ---------------------------------------------------------------------------
 # Only allowed relative endpoints
 # ---------------------------------------------------------------------------
 

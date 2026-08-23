@@ -557,6 +557,10 @@ PAGES.checkpoint = function (container) {
             "config.yaml is missing; checkpoint progress cannot be trusted. " +
             "Run gmail-tidy init to set up.", "warn"));
         }
+      }).catch(function () {
+        // The status fetch is advisory only (stale/missing-config warning).
+        // A rejection must not propagate to the outer handler, which blanks
+        // the already-rendered checkpoint view.
       });
     }
     clearLive();
