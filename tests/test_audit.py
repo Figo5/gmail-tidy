@@ -1,7 +1,11 @@
 # tests/test_audit.py
 import json
+
+import pytest
+
 from gmail_tidy.audit import AuditLog, AuditEntry, RunJournal, Candidate
 from gmail_tidy.config import Actions
+from gmail_tidy.errors import ConfigError
 
 
 def test_audit_log_shape(tmp_path):
@@ -99,3 +103,95 @@ def test_list_runs_ignores_stats_files(tmp_path):
     j.save_candidates(run_id, [])
     j.save_stats(run_id, {"evaluated": 0, "excluded": 0, "noop": 0, "candidates": 0})
     assert j.list_runs() == [run_id]
+
+
+# --- corrupt run files -> ConfigError / None (Task 35) -----------------------
+# load_candidates must convert every JSON/value/key/type/shape parse failure
+# into ConfigError(f"run {run_id} is corrupt or unreadable") while PRESERVING
+# FileNotFoundError for genuinely missing runs; load_stats must return None for
+# corrupt data while preserving missing/valid behavior. Save methods, the
+# failures parser, and everything else are untouched.
+
+
+@pytest.mark.parametrize("bad_content", [
+    "{ not json",                       # malformed JSON
+    '"just a string"',                  # valid JSON, not a list
+    '{"message_id": "m1"}',             # object instead of a list of records
+    "[[1, 2, 3]]",                      # list of non-record values
+    '{"message_id": "m1"}',             # list element missing thread_id/rule_id/actions
+    '[{"message_id": "m1"}]',           # record missing required keys
+    '[{"message_id": "m1", "thread_id": "t1", "rule_id": "r1", "actions": "oops", "before_labels": [], "in_inbox": true}]',  # actions not a dict
+    '[{"message_id": "m1", "thread_id": "t1", "rule_id": "r1", "actions": {}, "before_labels": "INBOX", "in_inbox": true}]',  # before_labels not a list
+    '[{"message_id": "m1", "thread_id": "t1", "rule_id": "r1", "actions": {"add_label": "oops", "archive": true}, "before_labels": [], "in_inbox": true}]',  # add_label not a list
+    '[{"message_id": "m1", "thread_id": "t1", "rule_id": "r1", "actions": {"add_label": [], "archive": "yes"}, "before_labels": [], "in_inbox": true}]',  # archive not a bool
+])
+def test_load_candidates_corrupt_json_raises_config_error(tmp_path, bad_content):
+    """Any JSON/value/key/type/shape failure while reading a run file must raise
+    ConfigError with the canonical message — never a raw JSON/KeyError/TypeError."""
+    j = RunJournal(tmp_path / "runs")
+    run_id = "corruptrun"
+    (tmp_path / "runs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "runs" / f"{run_id}.json").write_text(bad_content, encoding="utf-8")
+    with pytest.raises(ConfigError, match=f"run {run_id} is corrupt or unreadable"):
+        j.load_candidates(run_id)
+
+
+def test_load_candidates_missing_run_preserves_filenotfound(tmp_path):
+    """A genuinely missing run file must still raise FileNotFoundError — the
+    CLI depends on it to distinguish 'run not found' from 'run corrupt'."""
+    j = RunJournal(tmp_path / "runs")
+    with pytest.raises(FileNotFoundError):
+        j.load_candidates("no-such-run")
+
+
+def test_load_candidates_unicode_decode_error_is_config_error(tmp_path):
+    """Invalid UTF-8 bytes are a corrupt run too: UnicodeDecodeError -> ConfigError."""
+    j = RunJournal(tmp_path / "runs")
+    run_id = "bytesrun"
+    (tmp_path / "runs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "runs" / f"{run_id}.json").write_bytes(b"\xff\xfe\x00bad")
+    with pytest.raises(ConfigError, match=f"run {run_id} is corrupt or unreadable"):
+        j.load_candidates(run_id)
+
+
+@pytest.mark.parametrize("bad_content", [
+    "{ not json",         # malformed JSON
+    '"just a string"',    # valid JSON, not a dict
+    "[1, 2, 3]",          # a list, not a dict
+    "42",                 # a scalar
+    "null",               # null
+])
+def test_load_stats_corrupt_returns_none(tmp_path, bad_content):
+    """Corrupt stats JSON returns None — same as a run that never saved stats —
+    so summary/web degrade gracefully instead of crashing."""
+    j = RunJournal(tmp_path / "runs")
+    run_id = "corruptstats"
+    (tmp_path / "runs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "runs" / f"{run_id}.stats.json").write_text(bad_content, encoding="utf-8")
+    assert j.load_stats(run_id) is None
+
+
+def test_load_stats_unicode_decode_error_returns_none(tmp_path):
+    """Invalid UTF-8 bytes in a stats file are treated as absent -> None."""
+    j = RunJournal(tmp_path / "runs")
+    run_id = "bytesstats"
+    (tmp_path / "runs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "runs" / f"{run_id}.stats.json").write_bytes(b"\xff\xfe\x00")
+    assert j.load_stats(run_id) is None
+
+
+def test_load_stats_valid_dict_still_returned(tmp_path):
+    """A well-formed stats file keeps returning its dict — corrupt handling must
+    not swallow valid data."""
+    j = RunJournal(tmp_path / "runs")
+    run_id = j.init_run()
+    stats = {"evaluated": 5, "excluded": 2, "noop": 1, "candidates": 2}
+    j.save_stats(run_id, stats)
+    assert j.load_stats(run_id) == stats
+
+
+def test_load_stats_missing_returns_none(tmp_path):
+    """No stats file (old run) still returns None."""
+    j = RunJournal(tmp_path / "runs")
+    run_id = j.init_run()
+    assert j.load_stats(run_id) is None

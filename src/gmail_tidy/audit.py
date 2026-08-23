@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from gmail_tidy.config import Actions
+from gmail_tidy.errors import ConfigError
 
 
 def _chmod_600(path: Path) -> None:
@@ -99,18 +100,45 @@ class RunJournal:
         path = self.dir / f"{run_id}.json"
         if not path.exists():
             raise FileNotFoundError(f"run {run_id} not found")
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return [
-            Candidate(
-                message_id=d["message_id"],
-                thread_id=d["thread_id"],
-                rule_id=d["rule_id"],
-                actions=Actions(**d["actions"]),
-                before_labels=set(d["before_labels"]),
-                in_inbox=d["in_inbox"],
-            )
-            for d in data
-        ]
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            candidates: list[Candidate] = []
+            for d in data:
+                before = d["before_labels"]
+                if isinstance(before, (str, bytes)):
+                    # set("INBOX") would silently split into characters — a
+                    # string where a list is required is a shape error, not data.
+                    raise TypeError("before_labels must be a list")
+                act = d["actions"]
+                if not isinstance(act, dict):
+                    raise TypeError("actions must be a dict")
+                add_label = act.get("add_label", [])
+                remove_label = act.get("remove_label", [])
+                archive = act.get("archive", False)
+                if (isinstance(add_label, (str, bytes)) or isinstance(remove_label, (str, bytes))
+                        or not isinstance(add_label, list) or not isinstance(remove_label, list)
+                        or not isinstance(archive, bool)):
+                    # Actions is an unvalidated dataclass: a string add_label
+                    # or non-bool archive would flow through silently. Wrong
+                    # types are shape errors.
+                    raise TypeError("actions fields have invalid types")
+                candidates.append(
+                    Candidate(
+                        message_id=d["message_id"],
+                        thread_id=d["thread_id"],
+                        rule_id=d["rule_id"],
+                        actions=Actions(add_label=add_label, remove_label=remove_label,
+                                        archive=archive),
+                        before_labels=set(before),
+                        in_inbox=d["in_inbox"],
+                    )
+                )
+            return candidates
+        except (ValueError, TypeError, KeyError):
+            # A run file that fails to parse or deserialize is corrupt. This
+            # must surface as a local config-level error (exit 2) — never a raw
+            # JSONDecodeError/KeyError/TypeError leaking through the CLI.
+            raise ConfigError(f"run {run_id} is corrupt or unreadable") from None
 
     def save_stats(self, run_id: str, stats: dict) -> None:
         """Persist aggregate ScanStats counts (evaluated/excluded/noop/candidates).
@@ -127,7 +155,14 @@ class RunJournal:
         path = self.dir / f"{run_id}.stats.json"
         if not path.exists():
             return None
-        return json.loads(path.read_text(encoding="utf-8"))
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, TypeError):
+            # A corrupt stats file degrades exactly like a missing one (None):
+            # summary/web show "not recorded" instead of crashing. Type checks
+            # below also fold non-dict data (list/str/int/None) into None.
+            return None
+        return data if isinstance(data, dict) else None
 
     def record_failure(self, run_id: str, message_id: str, err: str) -> None:
         path = self.dir / f"{run_id}.failures.jsonl"

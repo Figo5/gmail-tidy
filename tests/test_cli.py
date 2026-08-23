@@ -1470,3 +1470,95 @@ def test_summary_malformed_failures_does_not_crash(tmp_path, monkeypatch):
     assert "m2: gone" in out
     assert "Traceback" not in out
     assert "JSONDecodeError" not in out
+
+
+# --- corrupt run files -> clean exit 2 (Task 35) -----------------------------
+# A run's .json (candidates) or .stats.json that fails to parse must never leak
+# a raw JSONDecodeError/KeyError/TypeError traceback through Click's default
+# handler. load_candidates converts parse failures to ConfigError and
+# load_stats returns None for corrupt stats, so every command that reads a run
+# (preview/summary/apply/undo) exits 2 with the canonical message and no
+# traceback. Missing runs keep their distinct 'run ... not found' text (still
+# exit 2), and valid runs are untouched.
+
+
+def _corrupt_run(tmp_path, run_id="corruptrun") -> str:
+    """Write a run dir containing a corrupt candidates file for run_id."""
+    (tmp_path / "runs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "runs" / f"{run_id}.json").write_text(
+        "{ not json at all", encoding="utf-8")
+    return run_id
+
+
+def _assert_clean_corrupt_exit(result, run_id):
+    assert result.exit_code == 2
+    assert f"run {run_id} is corrupt or unreadable" in result.output
+    # Typer.Exit(2) surfaces as SystemExit(2), proving the command body caught
+    # ConfigError instead of leaking it to Click's default handler.
+    assert isinstance(result.exception, SystemExit)
+    assert result.exception.code == 2
+    assert "Traceback" not in result.output
+    assert "JSONDecodeError" not in result.output
+    assert "KeyError" not in result.output
+    assert "TypeError" not in result.output
+
+
+def test_preview_corrupt_run_exits_2_no_traceback(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _corrupt_run(tmp_path)
+    result = runner.invoke(app, ["preview", "--run", run_id])
+    _assert_clean_corrupt_exit(result, run_id)
+
+
+def test_summary_corrupt_run_exits_2_no_traceback(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _corrupt_run(tmp_path)
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    _assert_clean_corrupt_exit(result, run_id)
+
+
+def test_apply_corrupt_run_exits_2_no_traceback(tmp_path, monkeypatch):
+    """apply on a corrupt run exits 2 before any Gmail/service call — the
+    corrupt file is a local config-level failure, not a write-path error."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    _mock_net(monkeypatch)  # never reached: load_candidates raises first
+    run_id = _corrupt_run(tmp_path)
+    result = runner.invoke(app, ["apply", "--run", run_id, "--yes"])
+    _assert_clean_corrupt_exit(result, run_id)
+
+
+def test_undo_corrupt_run_exits_2_no_traceback(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _corrupt_run(tmp_path)
+    result = runner.invoke(app, ["undo", run_id])
+    _assert_clean_corrupt_exit(result, run_id)
+
+
+def test_corrupt_run_keeps_missing_run_distinct(tmp_path, monkeypatch):
+    """A truly missing run file must still print 'not found' (exit 2) — the
+    corrupt-run ConfigError must not shadow the missing-run path."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    result = runner.invoke(app, ["preview", "--run", "no-such-run"])
+    assert result.exit_code == 2
+    assert "not found" in result.output.lower()
+    assert "corrupt or unreadable" not in result.output
+    assert "Traceback" not in result.output
+
+
+def test_corrupt_stats_degrades_gracefully_not_exit_2(tmp_path, monkeypatch):
+    """A corrupt .stats.json degrades to 'not recorded' (load_stats -> None),
+    exit 0 — NOT a crash and NOT exit 2, since candidates are still readable."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    j = RunJournal(tmp_path / "runs")
+    run_id = j.init_run()
+    j.save_candidates(run_id, [
+        Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True), in_inbox=True),
+    ])
+    (tmp_path / "runs" / f"{run_id}.stats.json").write_text(
+        "{ not json at all", encoding="utf-8")
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    assert result.exit_code == 0
+    assert "not recorded" in result.output.lower()
+    assert "Traceback" not in result.output
