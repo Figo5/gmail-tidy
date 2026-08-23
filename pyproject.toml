@@ -4,8 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gmail-tidy"
-version = "0.1.0"
 description = "Privacy-conscious declarative cleanup for existing Gmail mail — label + archive only."
+# Dynamic: the single source of truth is `__version__` in
+# src/gmail_tidy/__init__.py, read via hatch's `path` version source.
+dynamic = ["version"]
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [
@@ -47,6 +49,9 @@ Documentation = "https://github.com/Figo5/gmail-tidy#readme"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/gmail_tidy"]
+
+[tool.hatch.version]
+path = "src/gmail_tidy/__init__.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

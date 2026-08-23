@@ -236,10 +236,13 @@ The complete, audited API surface is `users.messages.list/get/batchModify`,
 
 Every command talks to Gmail by design — "dry-run" means **no writes**, not no
 network. `status`, `summary`, `preview`, and `web` are the exceptions: they read
-only local run/checkpoint/config data and never contact Gmail.
+only local run/checkpoint/config data and never contact Gmail. `gmail-tidy
+--version` is the other exception: it prints the package version and exits —
+no config, token, or network involved.
 
 | Command | Behavior |
 |---|---|
+| `--version` | Print the package version (single-sourced from `gmail_tidy.__version__`, same value as the installed package metadata) and exit `0`. Works with no config dir, token, or network. Deliberately no `-V` shorthand |
 | `web [--port N] [--no-browser]` | Start the loopback-only, read-only web viewer. Stdlib only; serves only local run/audit/checkpoint/config data — never Gmail, never OAuth tokens, never client secrets. Binds strictly `127.0.0.1` (there is deliberately no host flag). `--port N` (default `8765`, range 0–65535); `--port 0` asks the OS for a random free port (printed to stdout). `--no-browser` skips opening the default browser. Exit codes: `0` clean shutdown (Ctrl-C), `1` bind/startup failure, `2` usage error |
 | `init` | Create config dir + commented template (presets disabled), start read-only OAuth |
 | `scan [--limit N] [--all] [--rules ID...]` | Build candidate plan → local run file; prints counts only. `--limit N` caps the plan at **N new eligible candidates** (not raw messages fetched). `--all` scans the entire mailbox to exhaustion and is **mutually exclusive with `--limit`** (usage error, exit 2, checked before any Gmail client is built); a rule already marked exhausted in the checkpoint is skipped with zero Gmail calls, and progress is checkpointed per rule as it goes. Pagination resumes from a saved checkpoint each run |

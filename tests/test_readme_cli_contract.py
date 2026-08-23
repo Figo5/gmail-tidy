@@ -8,9 +8,8 @@ from the code without a test failure:
 1. every top-level command (web, init, scan, run, summary, preview, apply, undo,
    status) and the ``auth`` group's subcommands (status, refresh, revoke) are
    documented in the README's CLI section;
-2. every option string actually declared on those commands (``scan --all``,
-   ``preview --compact/--explain/--json``, ``summary --run``, ``web
-   --port/--no-browser``, ...) appears in the README's CLI section;
+2. every option string actually declared — including the app-level ``--version``
+   callback option — appears in the README's CLI section;
 3. every ``--option`` string written in the README's CLI table is a real option
    on the corresponding command — the docs must never invent an option the CLI
    does not have (guards against copy-paste drift).
@@ -63,8 +62,16 @@ def _own_options(func) -> set[str]:
 
 
 def _top_level_commands() -> dict[str, set[str]]:
-    """{command name: set of declared --options} for the root typer app."""
+    """{command name: set of declared --options} for the root typer app.
+
+    The app's own callback options (``--version``) are folded in under the
+    pseudo-command name ``*app.callback*`` so they participate in the same
+    option contract without being a subcommand.
+    """
     out: dict[str, set[str]] = {}
+    callback = cli.app.registered_callback
+    if callback is not None:
+        out["*app.callback*"] = _own_options(callback.callback)
     for info in cli.app.registered_commands:
         name = info.name or info.callback.__name__
         out[name] = _own_options(info.callback)
@@ -107,11 +114,17 @@ def _readme_option_map(section: str) -> dict[str, set[str]]:
 
 
 def test_top_level_commands_documented():
-    """Every top-level CLI command has its own row in the README CLI table."""
+    """Every top-level CLI command has its own row in the README CLI table.
+
+    The app-level callback (``*app.callback*``) is not a subcommand; its
+    options are documented at the section level and asserted by
+    ``test_app_level_options_documented``.
+    """
     section = _cli_section_text()
     documented = set(_readme_option_map(section))
     missing = [
-        name for name in _top_level_commands() if name not in documented
+        name for name in _top_level_commands()
+        if name != "*app.callback*" and name not in documented
     ]
     assert not missing, (
         f"top-level command(s) missing from README '## CLI' section: {sorted(missing)}"
@@ -131,17 +144,36 @@ def test_auth_subcommands_documented():
 
 
 def test_owned_options_documented():
-    """Every option the CLI declares is documented under its command's row."""
+    """Every option the CLI declares is documented under its command's row.
+
+    The app-level callback options (``--version``) have no row of their own;
+    they are documented as a top-level flag and asserted by
+    ``test_app_level_options_documented``.
+    """
     section = _cli_section_text()
     map_ = _readme_option_map(section)
     missing: dict[str, list[str]] = {}
     for name, opts in _top_level_commands().items():
+        if name == "*app.callback*":
+            continue  # app-level flags are documented at the section level
         for opt in sorted(opts):
             if opt not in map_.get(name, set()):
                 missing.setdefault(name, []).append(opt)
     assert not missing, (
         "option(s) owned by a command missing from its README CLI row: "
         + "; ".join(f"{k}: {v}" for k, v in sorted(missing.items()))
+    )
+
+
+def test_app_level_options_documented():
+    """App-level options (e.g. ``--version``) appear in the CLI section."""
+    section = _cli_section_text()
+    missing = [
+        opt for opt in sorted(_top_level_commands().get("*app.callback*", set()))
+        if opt not in section
+    ]
+    assert not missing, (
+        f"app-level option(s) missing from README '## CLI' section: {missing}"
     )
 
 

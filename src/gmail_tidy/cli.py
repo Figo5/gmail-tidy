@@ -18,6 +18,7 @@ from rich.table import Table
 from gmail_tidy import audit as audit_mod
 from gmail_tidy import auth as auth_mod
 from gmail_tidy import config as config_mod
+from gmail_tidy import __version__
 from gmail_tidy.actions import apply_run, scan as build_scan  # alias: command named scan below
 from gmail_tidy.checkpoint import checkpoint_path, load_checkpoint, save_checkpoint
 from gmail_tidy.errors import (
@@ -31,6 +32,27 @@ from gmail_tidy.undo import build_undo_plan, execute_undo
 
 app = typer.Typer(add_completion=False)
 console = Console()
+
+
+def _print_version(value: bool) -> None:
+    """Eager callback: print the version and exit BEFORE any command body runs.
+
+    ``gmail-tidy --version`` must work with no config dir, token, OAuth, or
+    network — so this runs before command dispatch and touches nothing but the
+    single-source ``__version__`` from ``gmail_tidy``. The version is printed
+    to stdout; there is deliberately no ``-V`` shorthand.
+    """
+    if value:
+        typer.echo(f"gmail-tidy, version {__version__}")
+        raise typer.Exit(EXIT_OK)
+
+
+@app.callback()
+def _main(version: bool = typer.Option(
+        False, "--version",
+        callback=_print_version, is_eager=True,
+        help="Show the package version and exit.")):
+    """Privacy-conscious declarative cleanup for existing Gmail mail."""
 
 
 def build_service(creds):
