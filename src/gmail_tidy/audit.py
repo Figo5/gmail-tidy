@@ -104,33 +104,49 @@ class RunJournal:
             data = json.loads(path.read_text(encoding="utf-8"))
             candidates: list[Candidate] = []
             for d in data:
+                if not isinstance(d, dict):
+                    # A record that is not an object (string/list/scalar) is a
+                    # shape error, not data.
+                    raise TypeError("candidate record must be a dict")
+                message_id = d["message_id"]
+                thread_id = d["thread_id"]
+                rule_id = d["rule_id"]
+                if not isinstance(message_id, str) or not isinstance(thread_id, str) \
+                        or not isinstance(rule_id, str):
+                    raise TypeError("candidate ids must be strings")
                 before = d["before_labels"]
-                if isinstance(before, (str, bytes)):
-                    # set("INBOX") would silently split into characters — a
-                    # string where a list is required is a shape error, not data.
-                    raise TypeError("before_labels must be a list")
+                if not isinstance(before, list) or not all(
+                        isinstance(x, str) for x in before):
+                    # set("INBOX") would silently split into characters, and a
+                    # dict/tuple/mixed list would flow through as garbage — a
+                    # list of strings is required, anything else is a shape error.
+                    raise TypeError("before_labels must be a list of strings")
+                in_inbox = d["in_inbox"]
+                if not isinstance(in_inbox, bool):
+                    raise TypeError("in_inbox must be a bool")
                 act = d["actions"]
                 if not isinstance(act, dict):
                     raise TypeError("actions must be a dict")
                 add_label = act.get("add_label", [])
                 remove_label = act.get("remove_label", [])
                 archive = act.get("archive", False)
-                if (isinstance(add_label, (str, bytes)) or isinstance(remove_label, (str, bytes))
-                        or not isinstance(add_label, list) or not isinstance(remove_label, list)
-                        or not isinstance(archive, bool)):
-                    # Actions is an unvalidated dataclass: a string add_label
-                    # or non-bool archive would flow through silently. Wrong
-                    # types are shape errors.
+                if (not isinstance(add_label, list) or not isinstance(remove_label, list)
+                        or not isinstance(archive, bool)
+                        or not all(isinstance(x, str) for x in add_label)
+                        or not all(isinstance(x, str) for x in remove_label)):
+                    # Actions is an unvalidated dataclass: a string/dict add_label,
+                    # non-string elements, or non-bool archive would flow through
+                    # silently. Wrong types are shape errors.
                     raise TypeError("actions fields have invalid types")
                 candidates.append(
                     Candidate(
-                        message_id=d["message_id"],
-                        thread_id=d["thread_id"],
-                        rule_id=d["rule_id"],
+                        message_id=message_id,
+                        thread_id=thread_id,
+                        rule_id=rule_id,
                         actions=Actions(add_label=add_label, remove_label=remove_label,
                                         archive=archive),
                         before_labels=set(before),
-                        in_inbox=d["in_inbox"],
+                        in_inbox=in_inbox,
                     )
                 )
             return candidates

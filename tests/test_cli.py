@@ -1562,3 +1562,75 @@ def test_corrupt_stats_degrades_gracefully_not_exit_2(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert "not recorded" in result.output.lower()
     assert "Traceback" not in result.output
+
+
+# --- wrong-shape run files -> clean exit 2 (Task 35 correction) ---------------
+# Valid JSON that is the WRONG SHAPE (record not a dict, non-string ids,
+# before_labels/add_label/remove_label not lists of strings, in_inbox not a
+# bool) must be treated exactly like corrupt JSON: ConfigError -> exit 2 with
+# the canonical message and no traceback/type-error leakage — for every command
+# that reads a run (preview/summary/apply/undo).
+
+
+def _wrong_shape_run(tmp_path, run_id="wrongshape") -> str:
+    """Write a run dir containing a valid-JSON-but-wrong-shape candidates file."""
+    (tmp_path / "runs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "runs" / f"{run_id}.json").write_text(
+        '[{"message_id": 42, "thread_id": "t1", "rule_id": "r1", '
+        '"actions": {"add_label": ["Cleanup/N"], "archive": true}, '
+        '"before_labels": ["INBOX"], "in_inbox": true}]',
+        encoding="utf-8",
+    )
+    return run_id
+
+
+def _assert_clean_wrong_shape_exit(result, run_id):
+    assert result.exit_code == 2
+    assert f"run {run_id} is corrupt or unreadable" in result.output
+    assert isinstance(result.exception, SystemExit)
+    assert result.exception.code == 2
+    assert "Traceback" not in result.output
+    assert "TypeError" not in result.output
+    assert "KeyError" not in result.output
+
+
+def test_preview_wrong_shape_run_exits_2_no_traceback(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _wrong_shape_run(tmp_path)
+    result = runner.invoke(app, ["preview", "--run", run_id])
+    _assert_clean_wrong_shape_exit(result, run_id)
+
+
+def test_summary_wrong_shape_run_exits_2_no_traceback(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _wrong_shape_run(tmp_path)
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    _assert_clean_wrong_shape_exit(result, run_id)
+
+
+def test_apply_wrong_shape_run_exits_2_no_traceback(tmp_path, monkeypatch):
+    """apply on a wrong-shape run exits 2 before any Gmail/service call."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    _mock_net(monkeypatch)  # never reached: load_candidates raises first
+    run_id = _wrong_shape_run(tmp_path)
+    result = runner.invoke(app, ["apply", "--run", run_id, "--yes"])
+    _assert_clean_wrong_shape_exit(result, run_id)
+
+
+def test_undo_wrong_shape_run_exits_2_no_traceback(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _wrong_shape_run(tmp_path)
+    result = runner.invoke(app, ["undo", run_id])
+    _assert_clean_wrong_shape_exit(result, run_id)
+
+
+def test_wrong_shape_run_keeps_missing_run_distinct(tmp_path, monkeypatch):
+    """A truly missing run file must still print 'not found' (exit 2) — the
+    wrong-shape ConfigError must not shadow the missing-run path."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    result = runner.invoke(app, ["preview", "--run", "no-such-run"])
+    assert result.exit_code == 2
+    assert "not found" in result.output.lower()
+    assert "corrupt or unreadable" not in result.output
+    assert "Traceback" not in result.output

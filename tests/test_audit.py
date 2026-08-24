@@ -124,6 +124,22 @@ def test_list_runs_ignores_stats_files(tmp_path):
     '[{"message_id": "m1", "thread_id": "t1", "rule_id": "r1", "actions": {}, "before_labels": "INBOX", "in_inbox": true}]',  # before_labels not a list
     '[{"message_id": "m1", "thread_id": "t1", "rule_id": "r1", "actions": {"add_label": "oops", "archive": true}, "before_labels": [], "in_inbox": true}]',  # add_label not a list
     '[{"message_id": "m1", "thread_id": "t1", "rule_id": "r1", "actions": {"add_label": [], "archive": "yes"}, "before_labels": [], "in_inbox": true}]',  # archive not a bool
+    # --- approved Task 35 correction scope: every wrong shape is corrupt -----
+    '["m1"]',                           # record is a string, not a dict
+    '[[1, 2, 3]]',                      # record is a list, not a dict
+    '[{"message_id": 42, "thread_id": "t1", "rule_id": "r1", "actions": {}, "before_labels": [], "in_inbox": true}]',  # message_id not a string
+    '[{"message_id": "m1", "thread_id": 42, "rule_id": "r1", "actions": {}, "before_labels": [], "in_inbox": true}]',  # thread_id not a string
+    '[{"message_id": "m1", "thread_id": "t1", "rule_id": 42, "actions": {}, "before_labels": [], "in_inbox": true}]',  # rule_id not a string
+    '[{"message_id": "m1", "thread_id": "t1", "rule_id": "r1", "actions": {}, "before_labels": {"INBOX": 1}, "in_inbox": true}]',  # before_labels is a dict
+    '[{"message_id": "m1", "thread_id": "t1", "rule_id": "r1", "actions": {}, "before_labels": [1], "in_inbox": true}]',  # before_labels non-string element
+    '[{"message_id": "m1", "thread_id": "t1", "rule_id": "r1", "actions": {}, "before_labels": ["INBOX", 2], "in_inbox": true}]',  # before_labels mixed
+    '[{"message_id": "m1", "thread_id": "t1", "rule_id": "r1", "actions": {}, "before_labels": [], "in_inbox": "yes"}]',  # in_inbox not a bool
+    '[{"message_id": "m1", "thread_id": "t1", "rule_id": "r1", "actions": {"add_label": {"a": 1}, "archive": true}, "before_labels": [], "in_inbox": true}]',  # add_label is a dict
+    '[{"message_id": "m1", "thread_id": "t1", "rule_id": "r1", "actions": {"add_label": [1], "archive": true}, "before_labels": [], "in_inbox": true}]',  # add_label non-string element
+    '[{"message_id": "m1", "thread_id": "t1", "rule_id": "r1", "actions": {"add_label": ["A", 2], "archive": true}, "before_labels": [], "in_inbox": true}]',  # add_label mixed
+    '[{"message_id": "m1", "thread_id": "t1", "rule_id": "r1", "actions": {"remove_label": {"a": 1}, "archive": true}, "before_labels": [], "in_inbox": true}]',  # remove_label is a dict
+    '[{"message_id": "m1", "thread_id": "t1", "rule_id": "r1", "actions": {"remove_label": [1], "archive": true}, "before_labels": [], "in_inbox": true}]',  # remove_label non-string element
+    '[{"message_id": "m1", "thread_id": "t1", "rule_id": "r1", "actions": {"remove_label": ["A", 2], "archive": true}, "before_labels": [], "in_inbox": true}]',  # remove_label mixed
 ])
 def test_load_candidates_corrupt_json_raises_config_error(tmp_path, bad_content):
     """Any JSON/value/key/type/shape failure while reading a run file must raise
@@ -134,6 +150,27 @@ def test_load_candidates_corrupt_json_raises_config_error(tmp_path, bad_content)
     (tmp_path / "runs" / f"{run_id}.json").write_text(bad_content, encoding="utf-8")
     with pytest.raises(ConfigError, match=f"run {run_id} is corrupt or unreadable"):
         j.load_candidates(run_id)
+
+
+def test_load_candidates_valid_roundtrip_all_fields(tmp_path):
+    """A well-formed run file with every field populated round-trips exactly —
+    the hardened validation must not reject valid data."""
+    j = RunJournal(tmp_path / "runs")
+    run_id = j.init_run()
+    cand = Candidate(
+        message_id="m1", thread_id="t1", rule_id="r1",
+        actions=Actions(add_label=["Cleanup/A", "Cleanup/B"],
+                        remove_label=["INBOX"], archive=False),
+        before_labels={"INBOX", "UNREAD"}, in_inbox=False,
+    )
+    j.save_candidates(run_id, [cand])
+    loaded = j.load_candidates(run_id)
+    assert loaded == [cand]
+    assert loaded[0].actions.add_label == ["Cleanup/A", "Cleanup/B"]
+    assert loaded[0].actions.remove_label == ["INBOX"]
+    assert loaded[0].actions.archive is False
+    assert loaded[0].before_labels == {"INBOX", "UNREAD"}
+    assert loaded[0].in_inbox is False
 
 
 def test_load_candidates_missing_run_preserves_filenotfound(tmp_path):
