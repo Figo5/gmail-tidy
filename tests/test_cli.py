@@ -1634,3 +1634,145 @@ def test_wrong_shape_run_keeps_missing_run_distinct(tmp_path, monkeypatch):
     assert "not found" in result.output.lower()
     assert "corrupt or unreadable" not in result.output
     assert "Traceback" not in result.output
+
+
+# --- valid-JSON but wrong-shape checkpoint files (Task 36) -------------------
+# A checkpoint.json that parses as JSON but is not the expected object shape
+# must degrade exactly like a missing/corrupt file: scan/run restart from a
+# fresh checkpoint (and persist a well-formed one), summary prints the
+# existing 'no checkpoint yet' fallback — and no command leaks a raw
+# AttributeError/TypeError traceback.
+
+
+def _wrong_shape_checkpoint(tmp_path) -> None:
+    """Top-level JSON list — valid JSON, wrong shape for a checkpoint file."""
+    (tmp_path / "checkpoint.json").write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+
+
+def _assert_no_traceback(result) -> None:
+    assert "Traceback" not in result.output
+    assert "AttributeError" not in result.output
+    assert "TypeError" not in result.output
+
+
+def test_scan_wrong_shape_checkpoint_degrades_cleanly(tmp_path, monkeypatch):
+    """scan with a list-shaped checkpoint.json: fresh start, normal run, no crash."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter", labels={"INBOX"})
+    _mock_net(monkeypatch, api)
+    _wrong_shape_checkpoint(tmp_path)
+    result = runner.invoke(app, ["scan"])
+    assert result.exit_code == 0  # candidate found, scan completed cleanly
+    _assert_no_traceback(result)
+    assert "scan complete" in result.output
+    # the fresh checkpoint was persisted back in valid shape
+    data = json.loads((tmp_path / "checkpoint.json").read_text(encoding="utf-8"))
+    assert isinstance(data["rules"], dict)
+
+
+def test_scan_wrong_shape_rules_degrades_clean(tmp_path, monkeypatch):
+    """scan with `rules` as a non-object (matching fingerprint): fresh start."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter", labels={"INBOX"})
+    _mock_net(monkeypatch, api)
+    cfg = config_mod.load_config(tmp_path / "config.yaml")
+    (tmp_path / "checkpoint.json").write_text(
+        json.dumps({"config_fingerprint": config_fingerprint(cfg),
+                    "rules": "not-an-object"}),
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["scan"])
+    assert result.exit_code == 0
+    _assert_no_traceback(result)
+    assert "scan complete" in result.output
+
+
+def test_run_wrong_shape_checkpoint_degrades_clean(tmp_path, monkeypatch):
+    """run --dry-run with a wrong-shape checkpoint: fresh start, exit 0, no crash."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    (tmp_path / "token.json").write_text(
+        json.dumps({
+            "token": "fake-token",
+            "refresh_token": "fake-refresh",
+            "client_id": "x",
+            "client_secret": "x",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "scopes": [
+                "https://www.googleapis.com/auth/gmail.modify",
+                "https://www.googleapis.com/auth/gmail.labels",
+            ],
+        }),
+        encoding="utf-8",
+    )
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter", labels={"INBOX"})
+    monkeypatch.setattr(cli, "build_service", lambda creds: api)
+    cfg = config_mod.load_config(tmp_path / "config.yaml")
+    (tmp_path / "checkpoint.json").write_text(
+        json.dumps({"config_fingerprint": config_fingerprint(cfg),
+                    "rules": {"r1": "garbage"}}),
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["run", "--dry-run"])
+    assert result.exit_code == 0
+    _assert_no_traceback(result)
+    assert "dry-run complete" in result.output
+
+
+def test_summary_wrong_shape_checkpoint_prints_no_checkpoint(tmp_path, monkeypatch):
+    """summary with a top-level-list checkpoint: 'no checkpoint yet', exit 0."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _save_run_with_stats(
+        tmp_path,
+        [Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                   actions=Actions(add_label=["Cleanup/A"], archive=True), in_inbox=True)],
+        stats={"evaluated": 1, "excluded": 0, "noop": 0, "candidates": 1},
+    )
+    _wrong_shape_checkpoint(tmp_path)
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    assert result.exit_code == 0
+    _assert_no_traceback(result)
+    assert "no checkpoint yet" in result.output
+
+
+def test_summary_wrong_shape_rules_prints_no_checkpoint(tmp_path, monkeypatch):
+    """summary with `rules` as a list (matching fingerprint): fallback, exit 0."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _save_run_with_stats(
+        tmp_path,
+        [Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                   actions=Actions(add_label=["Cleanup/A"], archive=True), in_inbox=True)],
+        stats={"evaluated": 1, "excluded": 0, "noop": 0, "candidates": 1},
+    )
+    (tmp_path / "checkpoint.json").write_text(
+        json.dumps({"config_fingerprint": "any-fp", "rules": [{"page_token": "tok"}]}),
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    assert result.exit_code == 0
+    _assert_no_traceback(result)
+    assert "no checkpoint" in result.output
+
+
+def test_summary_wrong_shape_rule_entries_graceful(tmp_path, monkeypatch):
+    """summary with a non-dict rule entry: 'no checkpoint yet', exit 0."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _save_run_with_stats(
+        tmp_path,
+        [Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                   actions=Actions(add_label=["Cleanup/A"], archive=True), in_inbox=True)],
+        stats={"evaluated": 1, "excluded": 0, "noop": 0, "candidates": 1},
+    )
+    (tmp_path / "checkpoint.json").write_text(
+        json.dumps({"config_fingerprint": "any-fp", "rules": {"r1": "garbage"}}),
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    assert result.exit_code == 0
+    _assert_no_traceback(result)
+    assert "no checkpoint" in result.output

@@ -193,3 +193,78 @@ def test_merge_checkpoint_empty_prior_keeps_fresh_only():
                            rules={"r1": RuleCheckpoint(page_token="tok1")})
     merged = merge_checkpoint(ScanCheckpoint(config_fingerprint="fp"), fresh)
     assert merged.rules == fresh.rules
+
+
+# --- valid-JSON but wrong-shape data (Task 36) ------------------------------
+# A checkpoint.json that parses as JSON but is not the expected shape must be
+# treated exactly like a missing/corrupt/fingerprint-mismatch file: a fresh
+# checkpoint, never a raw AttributeError/TypeError traceback leaking through
+# scan/run/summary. Each fixture writes valid JSON with the CURRENT fingerprint
+# so the mismatch is purely a shape error, not a config-change reset.
+
+
+def _write_checkpoint(path, payload, cfg):
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return load_checkpoint(path, cfg)
+
+
+def test_load_top_level_list_returns_fresh(tmp_path):
+    """checkpoint.json = `[1,2,3]` is valid JSON but not the expected object."""
+    cfg = _config()
+    cp = _write_checkpoint(tmp_path / "checkpoint.json", [1, 2, 3], cfg)
+    assert cp.config_fingerprint == config_fingerprint(cfg)
+    assert cp.rules == {}
+
+
+def test_load_top_level_string_returns_fresh(tmp_path):
+    """checkpoint.json = `"hello"` is valid JSON but not the expected object."""
+    cfg = _config()
+    cp = _write_checkpoint(tmp_path / "checkpoint.json", "hello", cfg)
+    assert cp.config_fingerprint == config_fingerprint(cfg)
+    assert cp.rules == {}
+
+
+def test_load_rules_list_returns_fresh(tmp_path):
+    """`rules` as a JSON list instead of an object is a shape error."""
+    cfg = _config()
+    payload = {"config_fingerprint": config_fingerprint(cfg),
+               "rules": [{"page_token": "tok-1"}]}
+    cp = _write_checkpoint(tmp_path / "checkpoint.json", payload, cfg)
+    assert cp.config_fingerprint == config_fingerprint(cfg)
+    assert cp.rules == {}
+
+
+def test_load_rules_string_returns_fresh(tmp_path):
+    """`rules` as a JSON string instead of an object is a shape error."""
+    cfg = _config()
+    payload = {"config_fingerprint": config_fingerprint(cfg),
+               "rules": "not-an-object"}
+    cp = _write_checkpoint(tmp_path / "checkpoint.json", payload, cfg)
+    assert cp.config_fingerprint == config_fingerprint(cfg)
+    assert cp.rules == {}
+
+
+def test_load_non_dict_rule_entry_dropped(tmp_path):
+    """A rule whose entry is a string/list/scalar is dropped, not crashed on."""
+    cfg = _config()
+    payload = {"config_fingerprint": config_fingerprint(cfg),
+               "rules": {"r1": "garbage", "r2": ["tok"], "r3": 42}}
+    cp = _write_checkpoint(tmp_path / "checkpoint.json", payload, cfg)
+    assert cp.config_fingerprint == config_fingerprint(cfg)
+    assert cp.rules == {}
+
+
+def test_load_mixed_valid_and_bad_rule_entries_keeps_valid(tmp_path):
+    """Well-formed rule entries survive; only the non-dict ones are dropped."""
+    cfg = _config()
+    payload = {"config_fingerprint": config_fingerprint(cfg),
+               "rules": {
+                   "r1": {"page_token": "tok-1", "exhausted": True},
+                   "r2": "garbage",
+                   "r3": ["not-a-dict"],
+               }}
+    cp = _write_checkpoint(tmp_path / "checkpoint.json", payload, cfg)
+    assert cp.config_fingerprint == config_fingerprint(cfg)
+    assert sorted(cp.rules) == ["r1"]
+    assert cp.rules["r1"].page_token == "tok-1"
+    assert cp.rules["r1"].exhausted is True

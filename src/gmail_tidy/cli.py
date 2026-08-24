@@ -384,7 +384,10 @@ def summary(run: str | None = typer.Option(None, "--run")):
             for rid, r in sorted(cp_rules.items()):
                 state = "exhausted" if r.get("exhausted") else "in-progress"
                 console.print(f"  {rid}: {state}")
-        except (OSError, ValueError):
+        except (OSError, ValueError, AttributeError, TypeError):
+            # AttributeError/TypeError: valid JSON with a wrong shape (top-level
+            # non-object, `rules` non-object, non-dict rule entry). Degrade to
+            # the same 'no checkpoint yet' fallback as missing/corrupt files.
             console.print("  no checkpoint yet")
 
         raise typer.Exit(EXIT_OK)

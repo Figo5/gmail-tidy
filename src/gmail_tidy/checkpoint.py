@@ -47,7 +47,15 @@ def checkpoint_path(cfg_dir: Path) -> Path:
 
 
 def load_checkpoint(path: Path, config: Config) -> ScanCheckpoint:
-    """Return a fresh checkpoint if missing, corrupt, or fingerprint mismatch (config changed)."""
+    """Return a fresh checkpoint if missing, corrupt, or fingerprint mismatch (config changed).
+
+    Valid-JSON-but-wrong-shape data degrades exactly like a corrupt file:
+    a top-level value that is not an object, a ``rules`` field that is not an
+    object, or a rule entry that is not an object are all shape errors, so a
+    fresh checkpoint is returned rather than a raw AttributeError/TypeError
+    leaking through scan/run/summary. Well-formed rule entries are preserved;
+    only the non-dict entries are dropped.
+    """
     fp = config_fingerprint(config)
     if not path.exists():
         return ScanCheckpoint(config_fingerprint=fp)
@@ -55,11 +63,21 @@ def load_checkpoint(path: Path, config: Config) -> ScanCheckpoint:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return ScanCheckpoint(config_fingerprint=fp)
+    if not isinstance(data, dict):
+        return ScanCheckpoint(config_fingerprint=fp)  # wrong shape; start fresh
     if data.get("config_fingerprint") != fp:
         return ScanCheckpoint(config_fingerprint=fp)  # config changed; start fresh
-    rules = {rid: RuleCheckpoint(page_token=r.get("page_token"),
-                                 exhausted=bool(r.get("exhausted", False)))
-             for rid, r in data.get("rules", {}).items()}
+    raw_rules = data.get("rules", {})
+    if not isinstance(raw_rules, dict):
+        return ScanCheckpoint(config_fingerprint=fp)  # wrong shape; start fresh
+    rules = {}
+    for rid, r in raw_rules.items():
+        if not isinstance(r, dict):
+            # A rule entry that is a string/list/scalar is a shape error:
+            # drop it rather than crash on r.get().
+            continue
+        rules[rid] = RuleCheckpoint(page_token=r.get("page_token"),
+                                    exhausted=bool(r.get("exhausted", False)))
     return ScanCheckpoint(config_fingerprint=fp, rules=rules)
 
 
