@@ -122,13 +122,21 @@ def _failures_summary(journal: audit_mod.RunJournal, run_id: str) -> None:
         console.print("no recorded failures")
 
 
-def _preview_undo(run_id: str, plan) -> None:
-    """Print the inverse plan (dry-run / preview path). Always exits EXIT_OK."""
-    console.print(f"inverse plan for run {run_id} (dry-run):")
+def _print_undo_plan(run_id: str, plan, *, apply: bool = False) -> None:
+    """Render the inverse plan (shared dry-run preview and write paths).
+
+    Prints the header plus one line per inverse action — the same surface as
+    preview, so `undo --apply`/`--apply --yes` always show exactly what will
+    be reversed BEFORE any confirmation prompt or write. ``apply`` selects
+    the ``(apply)`` marker (mirroring the ``(dry-run)``/``(apply)`` pair used
+    by preview/apply); the dry-run form is byte-for-byte identical to the
+    original preview output. Never exits — callers pick their own exit code.
+    """
+    marker = "(apply)" if apply else "(dry-run)"
+    console.print(f"inverse plan for run {run_id} {marker}:")
     for inv in plan:
         console.print(f"  {inv.message_id}: +{inv.add_label} -{inv.remove_label} "
                       f"inbox={inv.re_inbox}")
-    raise typer.Exit(EXIT_OK)
 
 
 def _exit_for(err: Exception) -> int:
@@ -531,12 +539,18 @@ def undo(run_id: str,
         #   (4) apply_ and not yes → confirm-then-write.
         #   (5) apply_ and yes → write immediately, never reading stdin.
         if dry_run:
-            _preview_undo(run_id, plan)
+            _print_undo_plan(run_id, plan)
+            raise typer.Exit(EXIT_OK)
         elif not apply_ and yes:
             raise ConfigError("--yes requires --apply")
         elif not apply_:
-            _preview_undo(run_id, plan)
+            _print_undo_plan(run_id, plan)
+            raise typer.Exit(EXIT_OK)
         else:
+            # The write path shows the same inverse plan as preview BEFORE the
+            # confirmation prompt (or, with --yes, before writing) — the user
+            # always sees exactly what will be reversed, for both branches.
+            _print_undo_plan(run_id, plan, apply=True)
             client = _client(cfg_dir, require_write=True)
             audit = audit_mod.AuditLog(cfg_dir / "audit.jsonl")
             confirm = (lambda: True) if yes else (lambda: typer.confirm("Proceed with undo?"))

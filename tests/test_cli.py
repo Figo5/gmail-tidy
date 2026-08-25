@@ -452,6 +452,120 @@ def test_undo_apply_yes_skips_user_changed_message(tmp_path, monkeypatch):
     assert "Cleanup/N" in api.label_names_of("m1")
 
 
+# --- undo --apply / --apply --yes print the inverse plan (Task 38) ----------
+# The write paths of `undo` must render the SAME inverse plan the dry-run
+# preview shows (message id, +add_labels, -remove_labels, inbox= flag) BEFORE
+# any confirmation prompt or write — for BOTH the prompt path and --yes — so
+# the user always sees exactly what will be reversed. The inverse plan prints
+# only message ids, label names, and the inbox boolean — never sender, subject,
+# body, size, or content. The dry-run preview output itself is pinned
+# byte-for-byte by a regression test so the refactor cannot drift it.
+
+
+def test_undo_apply_prompt_shows_inverse_plan_before_confirm(tmp_path, monkeypatch):
+    """--apply: the inverse plan is printed BEFORE 'Proceed with undo?'; a
+    decline cancels with exit 5 and nothing is written."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", labels={"Cleanup/N"})  # post-apply state
+    _mock_net(monkeypatch, api)
+    run_id = _save_run(
+        tmp_path,
+        Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True),
+                  before_labels={"INBOX"}, in_inbox=True),
+    )
+    result = runner.invoke(app, ["undo", run_id, "--apply"], input="n\n")
+    assert result.exit_code == 5  # decline cancels
+    assert "inverse plan" in result.output
+    assert "-['Cleanup/N']" in result.output  # the inverse action text
+    assert "inbox=True" in result.output
+    # the plan precedes the confirmation prompt
+    assert result.output.index("-['Cleanup/N']") < result.output.index("Proceed with undo?")
+    assert "cancelled." in result.output
+    assert "Cleanup/N" in api.label_names_of("m1")  # no write occurred
+    assert "INBOX" not in api.label_names_of("m1")
+
+
+def test_undo_apply_yes_shows_inverse_plan_then_writes(tmp_path, monkeypatch):
+    """--apply --yes: the inverse plan is printed before the write, with no
+    confirmation prompt (stdin untouched), and the undo executes."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", labels={"Cleanup/N"})  # post-apply state
+    _mock_net(monkeypatch, api)
+    run_id = _save_run(
+        tmp_path,
+        Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True),
+                  before_labels={"INBOX"}, in_inbox=True),
+    )
+
+    def _fail_if_confirmed(prompt):
+        raise AssertionError("--apply --yes must never call typer.confirm (stdin read)")
+
+    monkeypatch.setattr(cli.typer, "confirm", _fail_if_confirmed)
+    # No `input=` provided at all — if code tried to read stdin this would hang/fail.
+    result = runner.invoke(app, ["undo", run_id, "--apply", "--yes"])
+    assert result.exit_code == 0
+    assert "inverse plan" in result.output
+    assert "-['Cleanup/N']" in result.output  # the plan shown before writing
+    assert "Proceed with undo?" not in result.output
+    assert "Cleanup/N" not in api.label_names_of("m1")  # write happened
+    assert "INBOX" in api.label_names_of("m1")
+
+
+def test_undo_apply_plan_privacy_no_content(tmp_path, monkeypatch):
+    """The inverse plan prints only message ids, label names, and the inbox
+    flag — never sender, subject, body, size, or raw content."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", subject="SECRET-SUBJECT", from_hdr="attacker@example.com",
+                    size_kb=123.0, labels={"Cleanup/N"})
+    _mock_net(monkeypatch, api)
+    run_id = _save_run(
+        tmp_path,
+        Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True),
+                  before_labels={"INBOX"}, in_inbox=True),
+    )
+    result = runner.invoke(app, ["undo", run_id, "--apply", "--yes"])
+    assert result.exit_code == 0
+    assert "m1" in result.output          # message id column is allowed
+    assert "Cleanup/N" in result.output  # label name is allowed
+    assert "inbox=" in result.output     # the inbox flag is allowed
+    # forbidden: sender, subject, body, size, or raw content
+    assert "SECRET-SUBJECT" not in result.output
+    assert "attacker@example.com" not in result.output
+    assert "123.0" not in result.output
+    assert "body" not in result.output.lower()
+
+
+def test_undo_dry_run_output_byte_for_byte_regression(tmp_path, monkeypatch):
+    """Dry-run undo output is pinned byte-for-byte (header + one plan line per
+    inverse action, in order) — the Task 38 refactor must not change it."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", labels={"Cleanup/N"})
+    _mock_net(monkeypatch, api)
+    run_id = _save_run(
+        tmp_path,
+        Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True),
+                  before_labels={"INBOX"}, in_inbox=True),
+    )
+    result = runner.invoke(app, ["undo", run_id])
+    assert result.exit_code == 0
+    assert result.output == (
+        f"inverse plan for run {run_id} (dry-run):\n"
+        "  m1: +[] -['Cleanup/N'] inbox=True\n"
+    )
+
+
 def test_undo_unknown_run_exits_2(tmp_path, monkeypatch):
     monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
     result = runner.invoke(app, ["undo", "does-not-exist"])
