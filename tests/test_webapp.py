@@ -140,6 +140,38 @@ def test_status_empty_dir(tmp_path):
     }
 
 
+def test_status_wrong_shape_token_scopes_empty_200(tmp_path):
+    """A valid-JSON-but-wrong-shaped token must degrade to scopes [] — the
+    status route returns 200, never a 500 envelope from a raw
+    AttributeError/TypeError in scope_state."""
+    _populate(tmp_path)
+    (tmp_path / "token.json").write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+    resp = web.handle("GET", "/api/v1/status", tmp_path)
+    assert resp.status == 200
+    body = _body(resp)
+    assert body["token_present"] is True
+    assert body["scopes"] == []
+
+
+def test_status_scopes_string_token_scopes_empty_200(tmp_path):
+    _populate(tmp_path)
+    (tmp_path / "token.json").write_text('{"scopes": "readonly"}', encoding="utf-8")
+    resp = web.handle("GET", "/api/v1/status", tmp_path)
+    assert resp.status == 200
+    assert _body(resp)["scopes"] == []
+
+
+def test_status_mixed_scopes_token_scopes_empty_200(tmp_path):
+    _populate(tmp_path)
+    (tmp_path / "token.json").write_text(
+        json.dumps({"scopes": ["https://www.googleapis.com/auth/gmail.readonly", 42]}),
+        encoding="utf-8",
+    )
+    resp = web.handle("GET", "/api/v1/status", tmp_path)
+    assert resp.status == 200
+    assert _body(resp)["scopes"] == []
+
+
 def test_config_projection_criteria_only(tmp_path):
     _populate(tmp_path)
     resp = web.handle("GET", "/api/v1/config", tmp_path)

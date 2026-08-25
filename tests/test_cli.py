@@ -1776,3 +1776,130 @@ def test_summary_wrong_shape_rule_entries_graceful(tmp_path, monkeypatch):
     assert result.exit_code == 0
     _assert_no_traceback(result)
     assert "no checkpoint" in result.output
+
+
+# --- valid-JSON wrong-shape token files (Task 37) ----------------------------
+# scope_state now treats a token.json that parses as JSON but is the wrong shape
+# (top-level non-object, `scopes` not a list, or a list containing any
+# non-string) exactly like a missing/corrupt file: an empty scope set. So the
+# read-only `status`/`auth status` commands degrade to the existing `(none)`
+# scopes line, and every authenticated command (scan/apply/undo/run) degrades
+# to the EXISTING clean AuthError exit-4 path instead of leaking a raw
+# AttributeError/TypeError traceback through the command boundaries.
+
+
+def _wrong_shape_token(tmp_path, text=None) -> None:
+    """Write a wrong-shaped token.json (top-level JSON list by default)."""
+    (tmp_path / "token.json").write_text(text or json.dumps([1, 2, 3]), encoding="utf-8")
+
+
+def test_status_wrong_shape_token_clean_output(tmp_path, monkeypatch):
+    """status with a wrong-shaped token: exit 0, `(none)` scopes, no traceback."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    _wrong_shape_token(tmp_path)
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert "(none)" in result.output
+    assert "scopes" in result.output
+    _assert_no_traceback(result)
+
+
+def test_status_scopes_string_token_clean_output(tmp_path, monkeypatch):
+    """A string `scopes` field must render `(none)` — never a char-soup set."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    _wrong_shape_token(tmp_path, '{"scopes": "readonly"}')
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert "(none)" in result.output
+    _assert_no_traceback(result)
+
+
+def test_auth_status_wrong_shape_token_clean_output(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    _wrong_shape_token(tmp_path)
+    result = runner.invoke(app, ["auth", "status"])
+    assert result.exit_code == 0
+    assert "(none)" in result.output
+    _assert_no_traceback(result)
+
+
+def _assert_clean_auth_exit_for_wrong_shape_token(result) -> None:
+    """The existing AuthError path: exit 4, re-auth message, no traceback,
+    SystemExit(4) — proving the command body caught AuthError instead of
+    leaking the wrong-shape AttributeError to Click's default handler."""
+    assert result.exit_code == 4
+    assert isinstance(result.exception, SystemExit)
+    assert result.exception.code == 4
+    assert "Traceback" not in result.output
+    assert "AttributeError" not in result.output
+    assert "TypeError" not in result.output
+    # the canonical re-auth marker (interactive AuthError text says
+    # `` `gmail-tidy auth` ``, the headless gate says `` `gmail-tidy auth
+    # refresh` ``); rich may wrap the surrounding prose across lines but never
+    # splits the backticked command itself.
+    assert ("`gmail-tidy auth`" in result.output
+            or "`gmail-tidy auth refresh`" in result.output)
+
+
+def test_scan_wrong_shape_token_clean_auth_exit_4(tmp_path, monkeypatch):
+    """scan with a wrong-shaped token: existing clean AuthError -> exit 4, and
+    the unusable token is discarded (like the corrupt-token path)."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    _wrong_shape_token(tmp_path)
+    # build_service must never be reached: AuthError raises before it.
+    monkeypatch.setattr(cli, "build_service",
+                        lambda creds: (_ for _ in ()).throw(
+                            AssertionError("build_service must not be reached")))
+    result = runner.invoke(app, ["scan"])
+    _assert_clean_auth_exit_for_wrong_shape_token(result)
+    assert not (tmp_path / "token.json").exists()  # unusable token discarded
+
+
+def test_apply_wrong_shape_token_clean_auth_exit_4(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    run_id = _save_run(
+        tmp_path,
+        Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True),
+                  before_labels={"INBOX"}, in_inbox=True),
+    )
+    _wrong_shape_token(tmp_path)
+    monkeypatch.setattr(cli, "build_service",
+                        lambda creds: (_ for _ in ()).throw(
+                            AssertionError("build_service must not be reached")))
+    result = runner.invoke(app, ["apply", "--run", run_id, "--yes"])
+    _assert_clean_auth_exit_for_wrong_shape_token(result)
+    assert not (tmp_path / "token.json").exists()
+
+
+def test_undo_wrong_shape_token_clean_auth_exit_4(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    run_id = _save_run(
+        tmp_path,
+        Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True),
+                  before_labels={"INBOX"}, in_inbox=True),
+    )
+    _wrong_shape_token(tmp_path)
+    monkeypatch.setattr(cli, "build_service",
+                        lambda creds: (_ for _ in ()).throw(
+                            AssertionError("build_service must not be reached")))
+    result = runner.invoke(app, ["undo", run_id, "--apply", "--yes"])
+    _assert_clean_auth_exit_for_wrong_shape_token(result)
+    assert not (tmp_path / "token.json").exists()
+
+
+def test_run_wrong_shape_token_clean_exit_4(tmp_path, monkeypatch):
+    """run (headless): wrong-shaped token -> scope gate sees no write scopes ->
+    existing clean AuthError (exit 4) before any service, no traceback."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    _wrong_shape_token(tmp_path)
+    monkeypatch.setattr(cli, "build_service",
+                        lambda creds: (_ for _ in ()).throw(
+                            AssertionError("build_service must not be reached")))
+    result = runner.invoke(app, ["run", "--dry-run"])
+    _assert_clean_auth_exit_for_wrong_shape_token(result)

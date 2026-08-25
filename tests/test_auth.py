@@ -32,6 +32,73 @@ def test_token_path_constant(tmp_path):
     assert token_path(tmp_path) == tmp_path / "token.json"
 
 
+def _write_scope_file(tmp_path, text: str) -> Path:
+    """Write token.json at tmp_path and return its path."""
+    tok = tmp_path / "token.json"
+    tok.write_text(text, encoding="utf-8")
+    return tok
+
+
+# --- valid-JSON wrong-shape token data (Task 37) -----------------------------
+# scope_state must degrade exactly like a missing/corrupt file: valid JSON that
+# is the wrong shape (top-level non-object, `scopes` not a list, or a list
+# containing ANY non-string) returns an empty set — never a raw
+# AttributeError/TypeError leaking through status/auth status/the headless gate.
+
+
+def test_scope_state_top_level_list_returns_empty(tmp_path):
+    assert scope_state(_write_scope_file(tmp_path, "[1, 2, 3]")) == set()
+
+
+def test_scope_state_top_level_string_returns_empty(tmp_path):
+    assert scope_state(_write_scope_file(tmp_path, '"hello"')) == set()
+
+
+def test_scope_state_top_level_number_returns_empty(tmp_path):
+    assert scope_state(_write_scope_file(tmp_path, "42")) == set()
+
+
+def test_scope_state_scopes_string_returns_empty(tmp_path):
+    """`scopes` as a string is a shape error — never a character soup."""
+    assert scope_state(_write_scope_file(tmp_path, '{"scopes": "readonly"}')) == set()
+
+
+def test_scope_state_scopes_number_returns_empty(tmp_path):
+    assert scope_state(_write_scope_file(tmp_path, '{"scopes": 42}')) == set()
+
+
+def test_scope_state_scopes_object_returns_empty(tmp_path):
+    assert scope_state(_write_scope_file(tmp_path, '{"scopes": {"a": 1}}')) == set()
+
+
+def test_scope_state_scopes_null_returns_empty(tmp_path):
+    assert scope_state(_write_scope_file(tmp_path, '{"scopes": null}')) == set()
+
+
+def test_scope_state_mixed_scopes_returns_empty(tmp_path):
+    """A list containing ANY non-string is a shape error — the whole set is empty."""
+    assert scope_state(_write_scope_file(
+        tmp_path,
+        '{"scopes": ["https://www.googleapis.com/auth/gmail.readonly", 42]}',
+    )) == set()
+
+
+def test_scope_state_all_non_string_scopes_returns_empty(tmp_path):
+    assert scope_state(_write_scope_file(tmp_path, '{"scopes": [42, true, null]}')) == set()
+
+
+def test_scope_state_missing_scopes_key_returns_empty(tmp_path):
+    assert scope_state(_write_scope_file(tmp_path, '{"token": "x"}')) == set()
+
+
+def test_scope_state_valid_empty_list_returns_empty(tmp_path):
+    assert scope_state(_write_scope_file(tmp_path, '{"scopes": []}')) == set()
+
+
+def test_scope_state_corrupt_json_returns_empty(tmp_path):
+    assert scope_state(_write_scope_file(tmp_path, "{ not json")) == set()
+
+
 def test_readonly_token_is_not_silently_reused_for_write(tmp_path):
     """A read-only token must never be returned for a require_write=True call.
 

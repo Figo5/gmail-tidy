@@ -31,13 +31,28 @@ def token_path(cfg: Path) -> Path:
 
 
 def scope_state(token: Path) -> set[str]:
+    """Return the token's persisted ``scopes`` as a set of strings.
+
+    Missing and corrupt files already returned an empty set; valid-JSON-but-
+    wrong-shape data now degrades exactly the same way instead of leaking a raw
+    AttributeError/TypeError (or, for a string ``scopes``, a garbage character
+    soup) through status/auth status, the web status projection, and the
+    headless scope gate. A top-level value that is not an object, a ``scopes``
+    field that is not a list, or a list containing ANY non-string element are
+    all shape errors, so an empty set is returned.
+    """
     if not token.exists():
         return set()
     try:
         data = json.loads(token.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return set()
-    return set(data.get("scopes", []))
+    if not isinstance(data, dict):
+        return set()  # wrong shape; treat like missing/corrupt
+    raw_scopes = data.get("scopes", [])
+    if not isinstance(raw_scopes, list) or not all(isinstance(s, str) for s in raw_scopes):
+        return set()  # wrong shape; never return a char-soup set or mixed types
+    return set(raw_scopes)
 
 
 def _chmod_600(path: Path) -> None:
