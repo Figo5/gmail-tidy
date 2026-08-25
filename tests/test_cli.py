@@ -1196,6 +1196,20 @@ def test_preview_explain_empty_rules_config(tmp_path, monkeypatch):
     assert "no rules" in result.output.lower()
 
 
+def test_scan_malformed_rules_shape_exits_2_no_traceback(tmp_path, monkeypatch):
+    """A non-list `rules:` value must exit 2 (config error), never leak an
+    IndexError as a crash (Task 39). The red path here is that _format_errors
+    indexed loc[1] on the single-element loc ("rules",) and crashed with exit 1."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text("rules: notalist\n", encoding="utf-8")
+    result = runner.invoke(app, ["scan"])
+    assert result.exit_code == 2  # EXIT_CONFIG, clean
+    assert isinstance(result.exception, SystemExit)
+    assert result.exception.code == 2
+    assert "invalid config" in result.output.lower()
+    assert "Traceback" not in result.output
+
+
 # --- persistent Gmail failure -> RequestError -> clean exit 1 ----------------
 # gmail_client._execute retries 500/503 up to MAX_RETRIES then raises
 # RequestError. Before Task 28 that error escaped the command bodies' narrow

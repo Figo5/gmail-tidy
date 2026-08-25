@@ -193,6 +193,25 @@ def test_config_404_when_missing(tmp_path):
     assert resp.status == 404
 
 
+def test_status_malformed_rules_shape_config_valid_false(tmp_path):
+    """A non-list `rules:` value must report config_valid false (200), never a
+    500 — before Task 39 the IndexError in _format_errors escaped as internal
+    error."""
+    (tmp_path / "config.yaml").write_text("rules: notalist\n", encoding="utf-8")
+    resp = web.handle("GET", "/api/v1/status", tmp_path)
+    assert resp.status == 200
+    body = _body(resp)
+    assert body["config_present"] is True
+    assert body["config_valid"] is False
+
+
+def test_config_404_on_malformed_rules_shape(tmp_path):
+    """An invalid config must 404 /api/v1/config, never 500 (Task 39)."""
+    (tmp_path / "config.yaml").write_text("rules: notalist\n", encoding="utf-8")
+    resp = web.handle("GET", "/api/v1/config", tmp_path)
+    assert resp.status == 404
+
+
 def test_runs_projection(tmp_path):
     info = _populate(tmp_path)
     resp = web.handle("GET", "/api/v1/runs", tmp_path)

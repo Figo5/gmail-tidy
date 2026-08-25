@@ -186,3 +186,53 @@ def test_category_optional_and_null_accepted(tmp_path):
     loaded = load_config(cfg)
     assert loaded.rules[0].match.category is None
     assert loaded.rules[1].match.category is None
+
+
+# --- Task 39: malformed `rules` shapes must raise a clean ConfigError ---------
+# `_format_errors` tags rule errors by reading loc[1] when the rule list is
+# shaped as expected. For a non-list `rules` value the pydantic error loc is
+# just ("rules",) — indexing loc[1] used to raise IndexError, leaking an
+# unhandled crash out of load_config. These tests pin the clean path.
+
+
+def test_rules_scalar_raises_clean_config_error(tmp_path):
+    cfg = _write(tmp_path, "rules: notalist\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(cfg)
+    assert "rules" in str(exc.value)
+    assert "Traceback" not in str(exc.value)
+
+
+def test_rules_null_raises_clean_config_error(tmp_path):
+    cfg = _write(tmp_path, "rules: null\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(cfg)
+    assert "rules" in str(exc.value)
+
+
+def test_rules_dict_raises_clean_config_error(tmp_path):
+    cfg = _write(tmp_path, "rules: {id: x}\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(cfg)
+    assert "rules" in str(exc.value)
+
+
+def test_rules_non_dict_entry_raises_clean_config_error(tmp_path):
+    cfg = _write(tmp_path, "rules: [hello]\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(cfg)
+    assert "Traceback" not in str(exc.value)
+
+
+def test_rules_list_entry_error_tagged_with_rule_id(tmp_path):
+    """Errors nested inside a rules list entry keep the (rule '<id>') tag."""
+    cfg = _write(tmp_path,
+        "rules:\n"
+        "  - id: r1\n"
+        "    match: notamatch\n"
+        "    actions: {archive: true}\n")
+    with pytest.raises(ConfigError) as exc:
+        load_config(cfg)
+    msg = str(exc.value)
+    assert "r1" in msg
+    assert "rules.0.match" in msg

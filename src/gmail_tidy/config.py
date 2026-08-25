@@ -164,7 +164,7 @@ def _format_errors(exc: ValidationError, raw: object) -> str:
     for e in exc.errors():
         loc = e["loc"]
         label = ".".join(str(x) for x in loc)
-        if loc and loc[0] == "rules" and isinstance(loc[1], int) and isinstance(rules, list):
+        if loc and loc[0] == "rules" and len(loc) > 1 and isinstance(loc[1], int) and isinstance(rules, list):
             if 0 <= loc[1] < len(rules) and isinstance(rules[loc[1]], dict):
                 rid = rules[loc[1]].get("id")
                 if rid:
