@@ -821,3 +821,108 @@ def test_scan_special_category_rule_fetches_with_empty_query():
     scan(client, _old_unread_config())
     assert "" in seen  # the rule was fetched with the empty query
     assert "old_unread" not in seen  # the bare term is never emitted
+
+
+# --- overlapping rule queries: seen-dedup must follow the claim (Task 43) --
+# scan() previously added every fetched msg_id to the cross-rule `seen` set
+# BEFORE evaluating first_matching_rule. When an earlier rule's query fetched a
+# message that a LATER rule actually matched (first-match-wins), the earlier
+# rule consumed the message into `seen` as excluded/other-rule, and the later
+# rule's own pass then skipped it as already-seen — so the message was never
+# claimed even though it was eligible under the later rule. The dedup now fires
+# only after a rule claims the message (matched.id == rule.id).
+
+
+def _restrict_then_broader_config():
+    """r1 narrows its FETCH to 'newsletter' subjects but its MATCH also demands
+    the message be older than 10 days; r2 matches any 'newsletter' subject. Both
+    queries are 'newsletter' (identical), so r1's pass fetches messages that
+    r1's own match rejects — those must still be claimable by r2."""
+    return Config(
+        rules=[
+            Rule(id="r1", match=MatchConfig(subject_contains=["newsletter"], older_than_days=10),
+                 actions=Actions(add_label=["Cleanup/OldNews"], archive=True)),
+            Rule(id="r2", match=MatchConfig(subject_contains=["newsletter"]),
+                 actions=Actions(add_label=["Cleanup/News"], archive=True)),
+        ]
+    )
+
+
+def test_scan_overlap_later_broader_rule_claims_recent_newsletter():
+    """A recent newsletter is fetched by r1's query but rejected by r1's own
+    (older_than_days) match; first_matching_rule picks r2. The seen-dedup must
+    not swallow it under r1 — r2 (the later, broader rule) must claim it."""
+    api = MockGmailApi()
+    api.add_message("recent", subject="newsletter", labels={"INBOX"},
+                    internal_date_ms=_days_ago_ms(1))  # recent: r1's match rejects it
+    cands, _cp, stats = scan(GmailClient(api), _restrict_then_broader_config())
+    assert [c.message_id for c in cands] == ["recent"]
+    assert cands[0].rule_id == "r2"
+    # counted once as excluded under r1, then claimed (evaluated) under r2
+    assert stats.excluded == 1
+    assert stats.candidates == 1
+    assert stats.evaluated == stats.noop + stats.candidates
+
+
+def _old_then_large_config():
+    """old_unread first, large_messages second — BOTH fetch with the EMPTY query
+    (special categories emit no search term), so every message is fetched under
+    both rules' passes."""
+    return Config(
+        rules=[
+            Rule(id="old", match=MatchConfig(category="old_unread"),
+                 actions=Actions(add_label=["Cleanup/Old"], archive=True)),
+            Rule(id="big", match=MatchConfig(category="large_messages"),
+                 actions=Actions(add_label=["Cleanup/Big"], archive=True)),
+        ]
+    )
+
+
+def test_scan_overlap_special_categories_claim_large_recent_under_later_rule():
+    """old_unread and large_messages both fetch with the empty query (Task 42),
+    so a LARGE but RECENT message is fetched under the old_unread pass first,
+    rejected there (not old), and must still be claimed by the later
+    large_messages rule instead of being swallowed by the seen-dedup."""
+    from gmail_tidy.config import PRESETS
+    kb = PRESETS["large_messages"]["larger_than_kb"]
+    api = MockGmailApi()
+    api.add_message("big_recent", labels={"INBOX"}, unread=True,
+                    size_kb=float(kb) + 500.0, internal_date_ms=_days_ago_ms(1))
+    cands, _cp, _stats = scan(GmailClient(api), _old_then_large_config())
+    assert [c.message_id for c in cands] == ["big_recent"]
+    assert cands[0].rule_id == "big"
+
+
+def test_scan_identical_overlapping_rules_first_rule_wins():
+    """Two identical rules (same match, same query): first-match-wins must be
+    preserved — r1 claims every eligible message and r2 never re-claims one
+    (no duplicate candidates), even though r2's query fetches the same pages."""
+    cfg = Config(
+        rules=[
+            Rule(id="r1", match=MatchConfig(subject_contains=["newsletter"]),
+                 actions=Actions(add_label=["Cleanup/A"], archive=True)),
+            Rule(id="r2", match=MatchConfig(subject_contains=["newsletter"]),
+                 actions=Actions(add_label=["Cleanup/B"], archive=True)),
+        ]
+    )
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter", labels={"INBOX"})
+    api.add_message("m2", subject="newsletter", labels={"INBOX"})
+    cands, _cp, stats = scan(GmailClient(api), cfg)
+    assert [c.message_id for c in cands] == ["m1", "m2"]
+    assert [c.rule_id for c in cands] == ["r1", "r1"]  # never re-claimed by r2
+    assert stats.candidates == 2
+    assert stats.excluded == 0
+
+
+def test_scan_overlap_excluded_message_never_claimed():
+    """A protected (excluded) message fetched by BOTH empty-query passes is
+    still never claimed by either rule after the seen-move — exclusion stays
+    intact across overlapping rule queries."""
+    from gmail_tidy.config import PRESETS
+    kb = PRESETS["large_messages"]["larger_than_kb"]
+    api = MockGmailApi()
+    api.add_message("protected_big", labels={"INBOX", "IMPORTANT"},
+                    size_kb=float(kb) + 500.0, internal_date_ms=_days_ago_ms(1))
+    cands, _cp, _stats = scan(GmailClient(api), _old_then_large_config())
+    assert cands == []

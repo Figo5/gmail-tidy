@@ -122,13 +122,16 @@ def scan(client: GmailClient, config: Config, limit: int | None = None,
             for msg_id in page_ids:
                 if msg_id in seen:
                     continue
-                seen.add(msg_id)
                 meta = client.get_meta(msg_id, index)
                 matched = first_matching_rule(config, meta)
                 if matched is None or matched.id != rule.id:
                     # another rule won, or message excluded/not included/protected
                     stats.excluded += 1
                     continue
+                # Dedup only after THIS rule claims the message: a message that
+                # an earlier rule's query fetched but that a later rule matches
+                # (first-match-wins) must stay claimable by the later rule.
+                seen.add(msg_id)
                 stats.evaluated += 1
                 actions, changed = noop_eliminate(meta, rule.actions)
                 if not changed:
