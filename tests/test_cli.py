@@ -933,6 +933,114 @@ def test_summary_inbox_reduction_calculation(tmp_path, monkeypatch):
     assert "  inbox reduction  : 1" in out
 
 
+# --- summary totals: explicit INBOX removal counts as inbox reduction (Task 49)
+# A candidate that removes INBOX (e.g. `remove_label: [INBOX]`) archives the
+# message exactly like `archive: true` does — the write path drops INBOX from
+# remove_ids in both cases — so the summary must count it toward `inbox
+# reduction` and away from `labels-only`. Only a non-INBOX label removal (and
+# pure add-label candidates) remain labels-only. The `archive`/`archived` lines
+# still count ONLY the explicit `archive: true` action; an INBOX removal is
+# inbox reduction without being an archive action.
+
+
+def test_summary_explicit_inbox_remove_is_inbox_reduction(tmp_path, monkeypatch):
+    """`remove_label: [INBOX]` counts toward inbox reduction, not labels-only."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _save_run_with_stats(
+        tmp_path,
+        [Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                   actions=Actions(remove_label=["INBOX"]), in_inbox=True)],
+        stats={"evaluated": 1, "excluded": 0, "noop": 0, "candidates": 1},
+    )
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    assert result.exit_code == 0
+    out = result.output
+    # inbox reduction == 1 (the INBOX removal), labels-only == 0 (not a pure
+    # label op), and no archive action / archive count for this candidate.
+    assert "  inbox reduction  : 1" in out
+    assert "  labels-only      : 0" in out
+    assert "  archive action   : 0" in out
+    assert "  archived        : 0" in out
+    # the INBOX removal is still shown in the removed-labels breakdown
+    assert "  labels removed  : 1" in out
+    assert "INBOX" in out
+
+
+def test_summary_inbox_remove_with_other_labels_is_inbox_reduction(tmp_path, monkeypatch):
+    """A single candidate removing INBOX AND a user label counts once as inbox
+    reduction; the user label stays a plain label removal."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _save_run_with_stats(
+        tmp_path,
+        [Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                   actions=Actions(remove_label=["INBOX", "Promo"]), in_inbox=True)],
+        stats={"evaluated": 1, "excluded": 0, "noop": 0, "candidates": 1},
+    )
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    assert result.exit_code == 0
+    out = result.output
+    assert "  inbox reduction  : 1" in out
+    assert "  labels-only      : 0" in out
+    assert "  labels removed  : 2" in out  # both removals still reported
+    # both removed labels appear in the breakdown
+    assert "INBOX" in out
+    assert "Promo" in out
+
+
+def test_summary_non_inbox_remove_stays_labels_only(tmp_path, monkeypatch):
+    """A non-INBOX label removal is NOT inbox reduction — labels-only keeps it."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _save_run_with_stats(
+        tmp_path,
+        [Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                   actions=Actions(remove_label=["Promo"]), in_inbox=True)],
+        stats={"evaluated": 1, "excluded": 0, "noop": 0, "candidates": 1},
+    )
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    assert result.exit_code == 0
+    out = result.output
+    assert "  inbox reduction  : 0" in out
+    assert "  labels-only      : 1" in out
+    assert "  archive action   : 0" in out
+    assert "  labels removed  : 1" in out
+
+
+def test_summary_archive_true_still_counts_inbox_reduction(tmp_path, monkeypatch):
+    """Regression guard: archive=True remains inbox reduction, not labels-only."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _save_run_with_stats(
+        tmp_path,
+        [Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                   actions=Actions(archive=True), in_inbox=True)],
+        stats={"evaluated": 1, "excluded": 0, "noop": 0, "candidates": 1},
+    )
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    assert result.exit_code == 0
+    out = result.output
+    assert "  inbox reduction  : 1" in out
+    assert "  labels-only      : 0" in out
+    assert "  archive action   : 1" in out
+    assert "  archived        : 1" in out
+
+
+def test_summary_pure_add_label_stays_labels_only(tmp_path, monkeypatch):
+    """A pure add-label candidate is labels-only, not inbox reduction."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _save_run_with_stats(
+        tmp_path,
+        [Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                   actions=Actions(add_label=["Cleanup/N"]), in_inbox=True)],
+        stats={"evaluated": 1, "excluded": 0, "noop": 0, "candidates": 1},
+    )
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    assert result.exit_code == 0
+    out = result.output
+    assert "  inbox reduction  : 0" in out
+    assert "  labels-only      : 1" in out
+    assert "  archive action   : 0" in out
+    assert "  labels added    : 1" in out
+
+
 def test_summary_output_has_no_message_ids(tmp_path, monkeypatch):
     """Distinctive fake ids must never leak into summary output."""
     monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))

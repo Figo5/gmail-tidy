@@ -320,9 +320,23 @@ def summary(run: str | None = typer.Option(None, "--run")):
         console.print(f"[bold]Run {run_id}[/bold]")
         console.print("Totals:")
         console.print(f"  candidates       : {len(candidates)}")
-        inbox_reduction = sum(1 for c in candidates if c.in_inbox and c.actions.archive)
+        # inbox_reduction counts every candidate that leaves INBOX: either an
+        # explicit archive=True action OR an explicit remove_label: [INBOX]
+        # (the write path drops INBOX from remove_ids in both cases). Only
+        # INBOX qualifies — a non-INBOX label removal is a labels-only change.
+        inbox_reduction = sum(
+            1 for c in candidates
+            if c.in_inbox and (c.actions.archive or "INBOX" in c.actions.remove_label)
+        )
         console.print(f"  inbox reduction  : {inbox_reduction}")
-        labels_only = sum(1 for c in candidates if not c.actions.archive)
+        # labels-only is the complement: candidates that do NOT leave INBOX.
+        # The archive/archived lines below still count only explicit archive:true
+        # actions — an INBOX removal is inbox reduction without being an
+        # archive action.
+        labels_only = sum(
+            1 for c in candidates
+            if not (c.actions.archive or "INBOX" in c.actions.remove_label)
+        )
         archive_count = sum(1 for c in candidates if c.actions.archive)
         console.print(f"  labels-only      : {labels_only}")
         console.print(f"  archive action   : {archive_count}")
