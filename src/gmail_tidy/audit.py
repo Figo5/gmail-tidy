@@ -52,8 +52,56 @@ class AuditLog:
     def entries(self) -> list[AuditEntry]:
         if not self.path.exists():
             return []
-        with open(self.path, encoding="utf-8") as fh:
-            return [AuditEntry(**json.loads(line)) for line in fh if line.strip()]
+        out: list[AuditEntry] = []
+        try:
+            with open(self.path, encoding="utf-8") as fh:
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except (ValueError, TypeError):  # JSONDecodeError and malformed input
+                        continue
+                    if not isinstance(rec, dict):
+                        # A record that is not an object (list/string/scalar) is a
+                        # shape error, not data.
+                        continue
+                    if not all(isinstance(rec.get(k), str)
+                               for k in ("run_id", "message_id", "thread_id",
+                                         "rule_id", "action")):
+                        # Missing or non-string required fields are a shape
+                        # error — AuditEntry would raise TypeError or flow
+                        # garbage through unvalidated fields.
+                        continue
+                    # Optional fields (payload/kind/ts have dataclass defaults):
+                    # preserved when present and well-typed, defaulted when absent.
+                    entry_kwargs = {
+                        "run_id": rec["run_id"], "message_id": rec["message_id"],
+                        "thread_id": rec["thread_id"], "rule_id": rec["rule_id"],
+                        "action": rec["action"],
+                    }
+                    if "payload" in rec:
+                        payload = rec["payload"]
+                        if not isinstance(payload, (str, type(None))):
+                            continue
+                        entry_kwargs["payload"] = payload
+                    if "kind" in rec:
+                        if not isinstance(rec["kind"], str):
+                            continue
+                        entry_kwargs["kind"] = rec["kind"]
+                    if "ts" in rec:
+                        ts = rec["ts"]
+                        if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+                            # bool is not a timestamp.
+                            continue
+                        entry_kwargs["ts"] = float(ts)
+                    out.append(AuditEntry(**entry_kwargs))
+        except UnicodeError:
+            # A file whose bytes do not decode as UTF-8 is corrupt: degrade
+            # exactly like a missing file ([]) rather than crashing scan/undo/
+            # run with a raw UnicodeDecodeError.
+            return []
+        return out
 
 
 @dataclass

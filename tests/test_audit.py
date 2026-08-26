@@ -242,3 +242,180 @@ def test_load_stats_missing_returns_none(tmp_path):
     j = RunJournal(tmp_path / "runs")
     run_id = j.init_run()
     assert j.load_stats(run_id) is None
+
+
+# --- AuditLog.entries() hardening (Task 41) ---------------------------------
+# entries() must never crash scan/apply/undo/run and never leak partial or
+# garbage records: blank lines and lines that are not well-formed AuditEntry
+# records (malformed JSON, non-objects, missing/wrong-typed fields) are
+# skipped; valid records are preserved in file order; a file whose bytes do not
+# decode as UTF-8 — and a missing file — both degrade to [] like failures().
+
+
+def _entry_json(message_id: str = "m1", **overrides) -> dict:
+    """A complete, schema-valid audit line (what AuditLog.append writes)."""
+    rec = {
+        "run_id": "r1", "message_id": message_id, "thread_id": "t1",
+        "rule_id": "rule1", "action": "add_label", "payload": "Cleanup/A",
+        "kind": "apply", "ts": 1.0,
+    }
+    rec.update(overrides)
+    return rec
+
+
+def test_entries_missing_file_returns_empty(tmp_path):
+    """No audit file yet -> [] (the pre-existing missing-file contract)."""
+    assert AuditLog(tmp_path / "audit.jsonl").entries() == []
+
+
+def test_entries_valid_roundtrip_preserves_order_and_fields(tmp_path):
+    """Well-formed records round-trip exactly and stay in file order."""
+    path = tmp_path / "audit.jsonl"
+    log = AuditLog(path)
+    for i in range(3):
+        log.append(AuditEntry(run_id="r1", message_id=f"m{i}", thread_id=f"t{i}",
+                              rule_id="rule1", action="add_label",
+                              payload="Cleanup/A", kind="apply", ts=float(i)))
+    entries = log.entries()
+    assert [e.message_id for e in entries] == ["m0", "m1", "m2"]
+    assert entries[0].ts == 0.0 and entries[0].payload == "Cleanup/A"
+    assert entries[2].kind == "apply"
+
+
+def test_entries_blank_lines_skipped(tmp_path):
+    """Blank/whitespace-only lines are skipped, never crash."""
+    path = tmp_path / "audit.jsonl"
+    path.write_text(
+        json.dumps(_entry_json(message_id="m1")) + "\n"
+        + "\n"
+        + "   \n"
+        + json.dumps(_entry_json(message_id="m2")) + "\n",
+        encoding="utf-8",
+    )
+    assert [e.message_id for e in AuditLog(path).entries()] == ["m1", "m2"]
+
+
+def test_entries_malformed_lines_skipped(tmp_path):
+    """Lines that are not valid JSON are skipped without crashing."""
+    path = tmp_path / "audit.jsonl"
+    path.write_text(
+        json.dumps(_entry_json(message_id="m1")) + "\n"
+        + "this is not json{\n"
+        + "{broken\n"
+        + json.dumps(_entry_json(message_id="m2")) + "\n",
+        encoding="utf-8",
+    )
+    assert [e.message_id for e in AuditLog(path).entries()] == ["m1", "m2"]
+
+
+@pytest.mark.parametrize("bad_line", [
+    "[1, 2, 3]\n",     # valid JSON, not an object
+    '"just a string"\n',  # valid JSON, not an object
+    "42\n",             # scalar, not an object
+    "null\n",           # null, not an object
+])
+def test_entries_non_object_records_skipped(tmp_path, bad_line):
+    """Valid JSON that is not an object is skipped — never crashes."""
+    path = tmp_path / "audit.jsonl"
+    path.write_text(
+        bad_line
+        + json.dumps(_entry_json(message_id="m1")) + "\n"
+        + bad_line,
+        encoding="utf-8",
+    )
+    assert [e.message_id for e in AuditLog(path).entries()] == ["m1"]
+
+
+@pytest.mark.parametrize("key,value", [
+    ("run_id", 42),              # non-string run_id
+    ("message_id", 42),          # non-string message_id
+    ("thread_id", None),         # non-string thread_id
+    ("rule_id", ["r"]),          # non-string rule_id
+    ("action", 1),               # non-string action
+    ("kind", True),              # non-string kind
+    ("payload", 42),             # payload neither str nor None
+    ("payload", ["A"]),          # payload neither str nor None
+    ("ts", "yesterday"),         # non-numeric ts
+    ("ts", True),                # bool is not a timestamp
+])
+def test_entries_wrong_type_fields_skipped(tmp_path, key, value):
+    """Valid JSON with wrong field types is a corrupt record: skipped, so it
+    never flows through as garbage (dataclasses do not type-check)."""
+    bad = _entry_json(message_id="bad")
+    bad[key] = value
+    path = tmp_path / "audit.jsonl"
+    path.write_text(
+        json.dumps(bad) + "\n"
+        + json.dumps(_entry_json(message_id="m1")) + "\n",
+        encoding="utf-8",
+    )
+    assert [e.message_id for e in AuditLog(path).entries()] == ["m1"]
+
+
+@pytest.mark.parametrize("missing_key", [
+    "run_id", "message_id", "thread_id", "rule_id", "action",
+])
+def test_entries_missing_required_fields_skipped(tmp_path, missing_key):
+    """A record missing a required field (one with no dataclass default) is
+    corrupt — skipped, never crashed on."""
+    bad = _entry_json(message_id="bad")
+    del bad[missing_key]
+    path = tmp_path / "audit.jsonl"
+    path.write_text(
+        json.dumps(bad) + "\n"
+        + json.dumps(_entry_json(message_id="m1")) + "\n",
+        encoding="utf-8",
+    )
+    assert [e.message_id for e in AuditLog(path).entries()] == ["m1"]
+
+
+def test_entries_missing_optional_fields_use_defaults(tmp_path):
+    """Records missing the optional fields (payload/kind/ts, which have
+    dataclass defaults) stay valid and are preserved with their defaults —
+    hardening must not reject records the dataclass itself round-trips."""
+    path = tmp_path / "audit.jsonl"
+    path.write_text(
+        json.dumps(_entry_json(message_id="m1", kind="apply", ts=2.0,
+                               payload=None)) + "\n",
+        encoding="utf-8",
+    )
+    entry = AuditLog(path).entries()[0]
+    assert entry.message_id == "m1"
+    assert entry.kind == "apply"
+    assert entry.payload is None
+    assert entry.ts == 2.0
+
+
+def test_entries_valid_records_preserved_in_order_around_bad(tmp_path):
+    """Bad records anywhere never drop or reorder the valid ones."""
+    path = tmp_path / "audit.jsonl"
+    path.write_text(
+        json.dumps(_entry_json(message_id="m1")) + "\n"
+        + "garbage{{\n"
+        + json.dumps(_entry_json(message_id="m2")) + "\n"
+        + "\n"
+        + "[1, 2]\n"
+        + json.dumps(_entry_json(message_id="m3")) + "\n",
+        encoding="utf-8",
+    )
+    assert [e.message_id for e in AuditLog(path).entries()] == ["m1", "m2", "m3"]
+
+
+def test_entries_invalid_utf8_returns_empty(tmp_path):
+    """Invalid UTF-8 bytes degrade to [] — the same as a missing file — so
+    scan/undo/run never crash on an undecodable audit file."""
+    path = tmp_path / "audit.jsonl"
+    path.write_bytes(b"\xff\xfe\x00\x00")
+    assert AuditLog(path).entries() == []
+
+
+def test_entries_invalid_utf8_anywhere_returns_empty(tmp_path):
+    """A single undecodable byte anywhere makes the whole file undecodable:
+    entries() degrades to [] rather than returning partial data."""
+    path = tmp_path / "audit.jsonl"
+    path.write_bytes(
+        json.dumps(_entry_json(message_id="m1")).encode("utf-8")
+        + b"\xff\xfe"
+        + json.dumps(_entry_json(message_id="m2")).encode("utf-8")
+    )
+    assert AuditLog(path).entries() == []
