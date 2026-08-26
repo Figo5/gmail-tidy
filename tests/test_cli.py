@@ -1692,6 +1692,31 @@ def test_corrupt_stats_degrades_gracefully_not_exit_2(tmp_path, monkeypatch):
     assert "Traceback" not in result.output
 
 
+def test_summary_wrong_stats_graceful(tmp_path, monkeypatch):
+    """Summary with wrong-typed count values in the stats file degrades to
+    'not recorded' (load_stats -> None), exit 0 — never a crash, never raw
+    values (str/bool/float) printed as counts, and never exit 2, since the
+    candidates themselves are still readable."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    j = RunJournal(tmp_path / "runs")
+    run_id = j.init_run()
+    j.save_candidates(run_id, [
+        Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                  actions=Actions(add_label=["Cleanup/N"], archive=True), in_inbox=True),
+    ])
+    (tmp_path / "runs" / f"{run_id}.stats.json").write_text(
+        json.dumps({"evaluated": "five", "excluded": True,
+                    "noop": 1.0, "candidates": None}),
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    assert result.exit_code == 0
+    assert "not recorded" in result.output.lower()
+    assert "Traceback" not in result.output
+    assert "five" not in result.output          # str count never surfaces
+    assert "True" not in result.output          # bool count never surfaces
+
+
 # --- wrong-shape run files -> clean exit 2 (Task 35 correction) ---------------
 # Valid JSON that is the WRONG SHAPE (record not a dict, non-string ids,
 # before_labels/add_label/remove_label not lists of strings, in_inbox not a

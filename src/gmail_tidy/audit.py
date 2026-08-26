@@ -215,18 +215,39 @@ class RunJournal:
         _chmod_600(path)
 
     def load_stats(self, run_id: str) -> dict | None:
-        """Return the persisted stats dict for a run, or None if never saved (old runs)."""
+        """Return the persisted stats dict for a run, or None if never saved (old runs).
+
+        Hardened (Task 48): the expected count keys — ``evaluated``,
+        ``excluded``, ``noop``, ``candidates`` — must be non-bool ints when
+        present. A wrong-typed value (str/list/dict/bool/float/null) makes the
+        whole file corrupt and degrades to None, so summary/web can never print
+        or serve garbage counts. Missing and extra keys remain tolerated, and
+        valid int counts pass through unchanged. Invalid JSON, non-dict data,
+        and invalid UTF-8 still degrade to None exactly as before.
+        """
         path = self.dir / f"{run_id}.stats.json"
         if not path.exists():
             return None
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, UnicodeError):
             # A corrupt stats file degrades exactly like a missing one (None):
             # summary/web show "not recorded" instead of crashing. Type checks
-            # below also fold non-dict data (list/str/int/None) into None.
+            # below also fold non-dict data (list/str/int/None) into None, and
+            # a file whose bytes do not decode as UTF-8 is corrupt too.
             return None
-        return data if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            return None
+        for key in ("evaluated", "excluded", "noop", "candidates"):
+            if key not in data:
+                continue  # absent key: tolerated
+            value = data[key]
+            if not isinstance(value, int) or isinstance(value, bool):
+                # bool is an int subclass but not a count; str/list/dict/float/
+                # null are wrong-typed counts. A single bad count makes the
+                # whole stats file corrupt rather than leaking a partial dict.
+                return None
+        return data
 
     def record_failure(self, run_id: str, message_id: str, err: str) -> None:
         path = self.dir / f"{run_id}.failures.jsonl"

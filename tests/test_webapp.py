@@ -288,6 +288,26 @@ def test_run_detail_missing_regression_after_corruption_hardening(tmp_path):
     assert resp.status == 404
 
 
+def test_run_detail_wrong_typed_stats_is_null_200(tmp_path):
+    """A stats file whose count values are the wrong type (str/bool/float/
+    null) must project stats: null with status 200 — never a 500, and never
+    raw wrong-typed values leaking into the run detail response."""
+    info = _populate(tmp_path)
+    (tmp_path / "runs" / f"{info['run_id']}.stats.json").write_text(
+        json.dumps({"evaluated": "five", "excluded": True,
+                    "noop": 1.0, "candidates": None}),
+        encoding="utf-8",
+    )
+    resp = web.handle("GET", f"/api/v1/runs/{info['run_id']}", tmp_path)
+    assert resp.status == 200
+    body = _body(resp)
+    assert body["run"] == info["run_id"]          # candidates still readable
+    assert len(body["candidates"]) == 1
+    assert body["stats"] is None                  # wrong stats degrade to null
+    assert "five" not in json.dumps(body)         # str count never surfaces
+    assert "True" not in json.dumps(body)         # bool count never surfaces
+
+
 def test_audit_projection_and_limit(tmp_path):
     info = _populate(tmp_path)
     resp = web.handle("GET", "/api/v1/audit", tmp_path)

@@ -419,3 +419,53 @@ def test_entries_invalid_utf8_anywhere_returns_empty(tmp_path):
         + json.dumps(_entry_json(message_id="m2")).encode("utf-8")
     )
     assert AuditLog(path).entries() == []
+
+
+# --- load_stats count-key type validation (Task 48) -------------------------
+# load_stats must validate the expected count keys (evaluated/excluded/noop/
+# candidates) when present: each must be a non-bool int. A wrong-typed value
+# (str/list/dict/bool/float/null) makes the WHOLE stats file corrupt -> None,
+# exactly like the existing invalid-JSON / non-dict / invalid-UTF-8 cases.
+# Missing and extra keys remain tolerated, and valid int counts pass through
+# unchanged.
+
+
+@pytest.mark.parametrize("value", ["5", [5], {"n": 5}, True, 5.0, None])
+def test_load_stats_wrong_typed_count_value_returns_none(tmp_path, value):
+    """A present count key with a non-int value is corrupt data -> None, for
+    every one of the four expected count keys."""
+    j = RunJournal(tmp_path / "runs")
+    run_id = "wrongstats"
+    (tmp_path / "runs").mkdir(parents=True, exist_ok=True)
+    for key in ("evaluated", "excluded", "noop", "candidates"):
+        (tmp_path / "runs" / f"{run_id}.stats.json").write_text(
+            json.dumps({key: value}), encoding="utf-8")
+        assert j.load_stats(run_id) is None
+
+
+def test_load_stats_missing_count_keys_tolerated(tmp_path):
+    """A dict missing some of the expected count keys is still valid: absent
+    keys are tolerated and present ints pass through unchanged."""
+    j = RunJournal(tmp_path / "runs")
+    run_id = j.init_run()
+    j.save_stats(run_id, {"evaluated": 3})
+    assert j.load_stats(run_id) == {"evaluated": 3}
+
+
+def test_load_stats_extra_keys_tolerated(tmp_path):
+    """Extra keys alongside valid int counts are returned as-is — never the
+    reason to call a stats file corrupt."""
+    j = RunJournal(tmp_path / "runs")
+    run_id = j.init_run()
+    j.save_stats(run_id, {"evaluated": 3, "some_other_key": "x"})
+    assert j.load_stats(run_id) == {"evaluated": 3, "some_other_key": "x"}
+
+
+def test_load_stats_all_valid_int_counts_unchanged(tmp_path):
+    """All four count keys present as plain ints round-trip exactly — hardening
+    must never reject a well-formed stats dict."""
+    j = RunJournal(tmp_path / "runs")
+    run_id = j.init_run()
+    stats = {"evaluated": 5, "excluded": 2, "noop": 1, "candidates": 2}
+    j.save_stats(run_id, stats)
+    assert j.load_stats(run_id) == stats
