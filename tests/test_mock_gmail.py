@@ -93,3 +93,43 @@ def test_get_returns_label_ids_not_names():
     data = api.users().messages().get(id="m1").execute()
     assert "Cleanup/N" not in data["labelIds"]
     assert api.label_id("Cleanup/N") in data["labelIds"]
+
+
+# --- category: operator query semantics (Task 44) --------------------------
+
+
+def test_list_category_operator_matches_message_category():
+    """Gmail `category:` operator queries are satisfied against the message's
+    category field, exactly as Gmail resolves them."""
+    api = MockGmailApi()
+    api.add_message("upd", category="updates", labels={"INBOX"}, subject="newsletter")
+    api.add_message("promo", category="promotions", labels={"INBOX"}, subject="newsletter")
+    api.add_message("none", category=None, labels={"INBOX"}, subject="newsletter")
+    client = GmailClient(api)
+    assert client.list("category:updates") == ["upd"]
+    assert client.list("category:promotions") == ["promo"]
+    assert client.list("category:updates category:promotions") == []
+    # the operator is distinct from a bare-term match: the bare word "updates"
+    # never appears in any From/Subject haystack, so a substring query matches
+    # nothing even though the category query does
+    assert client.list("updates") == []
+
+
+def test_category_operator_still_ANDs_with_text_terms():
+    api = MockGmailApi()
+    api.add_message("m1", category="updates", labels={"INBOX"}, subject="digest A")
+    api.add_message("m2", category="updates", labels={"INBOX"}, subject="other")
+    client = GmailClient(api)
+    assert client.list("category:updates digest") == ["m1"]
+
+
+def test_no_category_operator_resolves_to_fetch_everything():
+    """A message with no Gmail category is matched by the empty query and by
+    plain text terms, but not by any category: operator."""
+    api = MockGmailApi()
+    api.add_message("m1", category=None, labels={"INBOX"}, subject="alert here")
+    client = GmailClient(api)
+    assert client.list("") == ["m1"]
+    assert client.list("alert") == ["m1"]
+    assert client.list("category:notifications") == []  # unknown category op
+    assert client.list("category:updates") == []

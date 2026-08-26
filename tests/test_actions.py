@@ -2,7 +2,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 import pytest
-from gmail_tidy.config import Config, Rule, MatchConfig, Actions
+from gmail_tidy.config import Config, PRESETS, Rule, MatchConfig, Actions
 from gmail_tidy.actions import scan, apply_run, ScanStats, query_from_match
 from gmail_tidy.audit import RunJournal, AuditLog, Candidate
 from gmail_tidy.checkpoint import (
@@ -722,11 +722,22 @@ def test_generic_exception_still_recorded_and_loop_continues(tmp_path):
     assert j.failures(run_id)[0].startswith("m2: ")
 
 
-# --- special-category preset query narrowing (Task 42) ----------------------
-# old_unread and large_messages have NO meaningful Gmail search term, so
-# query_from_match must emit nothing for them — otherwise a pure special-category
-# rule would fetch nothing (the bare term "old_unread" never appears in From or
-# Subject) and the scan would starve. Text-probe categories keep their bare term.
+# --- preset query narrowing (Tasks 42 & 44) ---------------------------------
+# Task 42: old_unread and large_messages have NO meaningful Gmail search term,
+# so query_from_match must emit nothing for them — otherwise a pure special-
+# category rule would fetch nothing and the scan would starve. The special
+# categories therefore still contribute no term (and a mixed special-category
+# rule narrows on its text parts only).
+#
+# Task 44: the three text-probe categories WITH a valid Gmail category:
+# operator use PRESETS[category]['query'] as their fetch term
+# (category:updates / category:promotions / category:purchases) instead of the
+# bare category name. notifications has NO valid Gmail category operator, so it
+# carries no 'query' in PRESETS and emits no narrowing term — its rules fetch
+# everything and filter locally. PRESETS is the single source of truth — the
+# emitted term is read from the preset, not hardcoded in this test, so a preset
+# query edit cannot silently drift from the code. user MatchConfig.query stays
+# ignored.
 
 
 def test_query_from_match_special_category_emits_no_term():
@@ -745,10 +756,54 @@ def test_query_from_match_special_category_keeps_other_parts():
     ) == "sender@example.com"
 
 
-def test_query_from_match_text_probe_categories_unchanged():
-    """Text-probe categories still narrow with their bare category term."""
-    for cat in ("newsletters", "promotions", "receipts", "notifications"):
-        assert query_from_match(MatchConfig(category=cat)) == cat
+def test_query_from_match_text_probe_uses_preset_query():
+    """Each text-probe category with a preset query narrows with
+    PRESETS[category]['query'] — never the bare category name."""
+    for cat in ("newsletters", "promotions", "receipts"):
+        assert PRESETS[cat]["query"]  # these probe presets carry a query
+        assert query_from_match(MatchConfig(category=cat)) == PRESETS[cat]["query"]
+        assert query_from_match(MatchConfig(category=cat)) != cat
+
+
+def test_query_from_match_preset_query_matches_expected_operators():
+    """The three probe presets with an operator narrow with Gmail category:
+    queries; notifications emits NO operator (it has no valid one)."""
+    assert query_from_match(MatchConfig(category="newsletters")) == "category:updates"
+    assert query_from_match(MatchConfig(category="promotions")) == "category:promotions"
+    assert query_from_match(MatchConfig(category="receipts")) == "category:purchases"
+    # notifications has no valid Gmail category operator -> empty narrowing
+    assert "query" not in PRESETS["notifications"]
+    assert query_from_match(MatchConfig(category="notifications")) == ""
+
+
+def test_query_from_match_notifications_emits_no_term():
+    """A pure notifications rule emits an EMPTY query (no preset query key), so
+    the scan fetches everything and filters locally via the notifications
+    probes — a bare 'notifications' word never appears in From/Subject."""
+    assert "query" not in PRESETS["notifications"]
+    assert query_from_match(MatchConfig(category="notifications")) == ""
+
+
+def test_query_from_match_notifications_keeps_other_parts():
+    """A mixed notifications rule narrows on its text parts only; the preset
+    itself contributes no operator term."""
+    assert query_from_match(
+        MatchConfig(category="notifications", subject_contains=["alert"])
+    ) == "alert"
+    assert query_from_match(
+        MatchConfig(category="notifications", from_contains=["sender@example.com"])
+    ) == "sender@example.com"
+
+
+def test_query_from_match_ignores_user_query_still():
+    """User MatchConfig.query stays ignored even with a preset category."""
+    assert query_from_match(
+        MatchConfig(category="newsletters", query="user-override")
+    ) == PRESETS["newsletters"]["query"]
+    # and with a no-operator preset it still contributes nothing
+    assert query_from_match(
+        MatchConfig(category="notifications", query="user-override")
+    ) == ""
 
 
 # --- offline end-to-end scans for the special categories -------------------
@@ -821,6 +876,101 @@ def test_scan_special_category_rule_fetches_with_empty_query():
     scan(client, _old_unread_config())
     assert "" in seen  # the rule was fetched with the empty query
     assert "old_unread" not in seen  # the bare term is never emitted
+
+
+# --- offline end-to-end scans for the text-probe categories (Task 44) -------
+# The three probe presets with a valid Gmail category: operator narrow the
+# fetch with PRESETS[category]['query']. notifications has no operator, so its
+# rules fetch everything (empty query) and local probe matching decides.
+
+
+def _first_probe(cat: str) -> str:
+    """First From/Subject probe text for a probe category (rules._TEXT_PROBES
+    is the single source; PRESETS probes stay matched through rules)."""
+    from gmail_tidy.rules import _TEXT_PROBES
+    return _TEXT_PROBES[cat][0]
+
+
+def _probe_config(cat: str):
+    return Config(
+        rules=[Rule(id="r1", match=MatchConfig(category=cat),
+                    actions=Actions(add_label=["Cleanup/C"], archive=True))],
+    )
+
+
+def test_scan_text_probe_preset_query_returns_only_probe_matches():
+    """End-to-end offline scan: a text-probe category rule must fetch with the
+    PRESETS category operator query and return exactly the probe-matching
+    messages in that Gmail category — a same-category message with no probe
+    text is fetched but locally rejected, and a probe-bearing message in a
+    different category is never even fetched."""
+    for cat in ("newsletters", "promotions", "receipts"):
+        gmail_cat = PRESETS[cat]["query"].split(":", 1)[1]  # e.g. updates
+        probe = _first_probe(cat)
+        api = MockGmailApi()
+        # in the preset's category AND carrying the probe text: the candidate
+        api.add_message("probe", category=gmail_cat, labels={"INBOX"},
+                        subject=f"{probe} inside")
+        # in the category but no probe text: passes the fetch, fails the local
+        # probe match -> excluded by the rule check itself
+        api.add_message("cat_no_probe", category=gmail_cat, labels={"INBOX"},
+                        subject="totally unrelated")
+        # probe text but a DIFFERENT category: would match the rule locally but
+        # is never fetched under the operator query
+        api.add_message("probe_wrong_cat", category="forums", labels={"INBOX"},
+                        subject=f"{probe} inside")
+        cands, _cp, _stats = scan(GmailClient(api), _probe_config(cat))
+        assert [c.message_id for c in cands] == ["probe"], cat
+
+
+def test_scan_text_probe_category_fetches_with_preset_query():
+    """The fetch query scan drives for a text-probe category rule is exactly
+    PRESETS[category]['query'] (the operator form) — never the bare name."""
+    api = MockGmailApi()
+    api.add_message("m1", labels={"INBOX"}, subject="newsletter")
+    client, seen = _spy_list_page(GmailClient(api))
+    scan(client, _probe_config("newsletters"))
+    assert set(seen) == {PRESETS["newsletters"]["query"]}
+    assert "newsletters" not in seen  # the bare term is never emitted
+    assert "" not in seen  # a preset category never falls back to fetch-everything
+
+
+def test_scan_notifications_fetches_with_empty_query():
+    """A pure notifications rule must drive list_page with an EMPTY query
+    (fetch everything, filter locally) — never a bare 'notifications' term and
+    never a made-up 'category:notifications' operator."""
+    api = MockGmailApi()
+    api.add_message("m1", labels={"INBOX"}, subject="alert")
+    client, seen = _spy_list_page(GmailClient(api))
+    scan(client, _probe_config("notifications"))
+    assert "" in seen  # the rule was fetched with the empty query
+    assert "notifications" not in seen  # the bare term is never emitted
+    assert "category:notifications" not in seen  # the invalid operator is never emitted
+
+
+def test_scan_notifications_returns_only_probe_matches_across_categories():
+    """A pure notifications rule fetches across ANY Gmail category and returns
+    only the notification-probe-matching messages — local probe matching alone
+    decides eligibility."""
+    api = MockGmailApi()
+    # notification probe text in 'updates' category: the candidate
+    api.add_message("notif_updates", category="updates", labels={"INBOX"},
+                    subject="system alert")
+    # notification probe text in 'forums' category: also eligible — the local
+    # probe match spans categories
+    api.add_message("notif_forums", category="forums", labels={"INBOX"},
+                    subject="you have a notification")
+    # probe text in no category at all: eligible too (no narrowing applied)
+    api.add_message("notif_none", category=None, labels={"INBOX"},
+                    subject="Alert: action required")
+    # no probe text (even with category:updates): rejected locally
+    api.add_message("no_probe", category="updates", labels={"INBOX"},
+                    subject="totally unrelated")
+    cands, _cp, _stats = scan(GmailClient(api), _probe_config("notifications"))
+    assert {c.message_id for c in cands} == {"notif_updates", "notif_forums",
+                                             "notif_none"}
+    # the probe-matching messages were claimed, the unrelated one was not
+    assert "no_probe" not in {c.message_id for c in cands}
 
 
 # --- overlapping rule queries: seen-dedup must follow the claim (Task 43) --

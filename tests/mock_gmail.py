@@ -34,6 +34,10 @@ class _Msg:
     headers: dict[str, str] = field(default_factory=dict)
     size_kb: float = 0.0
     unread: bool = False
+    # Gmail category the message belongs to (e.g. "updates", "promotions",
+    # "purchases"). Mirrors Gmail's category labels so `category:` operator
+    # queries can be satisfied offline; None means "in no category".
+    category: str | None = None
 
 
 class _Req:
@@ -103,7 +107,8 @@ class MockGmailApi:
     def add_message(self, msg_id: str, *, labels: set[str] | None = None,
                     size_kb: float = 0.0, subject: str = "",
                     from_hdr: str = "sender@example.com", to_hdr: str = "you@example.com",
-                    unread: bool = False, internal_date_ms: int = 0) -> str:
+                    unread: bool = False, internal_date_ms: int = 0,
+                    category: str | None = None) -> str:
         self.store[msg_id] = _Msg(
             id=msg_id,
             thread_id=f"t-{msg_id}",
@@ -112,6 +117,7 @@ class MockGmailApi:
             headers={"From": from_hdr, "To": to_hdr, "Subject": subject},
             size_kb=size_kb,
             unread=unread,
+            category=category,
         )
         return msg_id
 
@@ -207,4 +213,14 @@ def _matches_query(m: _Msg, query: str) -> bool:
     if not query:
         return True
     haystack = f"{m.headers.get('From', '')} {m.headers.get('Subject', '')}".lower()
-    return all(part.lower() in haystack for part in query.split() if part)
+    for part in query.split():
+        if not part:
+            continue
+        if part.startswith("category:"):
+            # Gmail category operator: satisfies on the message's category.
+            want = part[len("category:"):].lower()
+            if (m.category or "").lower() != want:
+                return False
+        elif part.lower() not in haystack:
+            return False
+    return True

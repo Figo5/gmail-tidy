@@ -49,9 +49,13 @@ rules: []                    # required-at-runtime list of rules
 ## `match` keys (metadata only)
 
 Rules match **metadata only** — never message bodies. The fetch is narrowed with
-bare terms from `from_contains`, `subject_contains`, and the `category` term;
-eligibility is always re-decided locally from fetched metadata. (The `query` key
-is accepted but currently ignored — see the `match` table below.)
+terms from `from_contains`, `subject_contains`, and the preset's `query`
+(`PRESETS[category]['query']`, the Gmail `category:` operator — see the presets
+table below); eligibility is always re-decided locally from fetched metadata.
+A preset without a `query` (notifications and the special presets) contributes
+no narrowing term, so rules built on it fetch everything and filter locally.
+The `query` key on the rule itself is accepted but ignored — see the `match`
+table below.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -66,7 +70,7 @@ is accepted but currently ignored — see the `match` table below.)
 | `newer_than_days` | int | Message is at most this old. |
 | `larger_than_kb` | int | Estimated size ≥ this many KiB. |
 | `unread` | bool | `true` matches unread, `false` matches read. |
-| `query` | string | **Accepted but currently ignored.** A valid key (configs load), but the fetch query built by `query_from_match` does not read it and rule matching never evaluates it, so a rule whose only `match` key is `query` matches every fetched message. No effect today. |
+| `query` | string | **Accepted but ignored by the tool.** A valid key (configs load), but the fetch query built by `query_from_match` does not read it — a preset `category` supplies its own narrowing term, and rule matching never evaluates it either — so a rule whose only `match` key is `query` matches every fetched message. No effect today. |
 
 > Aliases: the config keys `match_from` and `match_label` are accepted anywhere
 > `from_contains` and `labels_have` are, and are normalized to the canonical names
@@ -107,17 +111,21 @@ is no delete, trash, spam-report, send, or import action anywhere in the tool.
 ## Presets (disabled by default)
 
 These are shipped commented-out in the template; uncomment the block you want. They
-are metadata heuristics; the category's bare term is used to narrow the candidate
-fetch only (never `category:` operator syntax — see the presets table below).
+are metadata heuristics; each text-probe preset narrows the candidate fetch with its
+Gmail `category:` operator query (`PRESETS[category]['query']`) when it has one, and
+eligibility is still re-decided locally from fetched metadata. The presets without a
+valid Gmail `category:` operator — `notifications` and the special presets
+(`old_unread`, `large_messages`) — have **no** search term: rules built on them fetch
+everything and filter locally.
 
 | Preset | Effect (heuristic) |
 |---|---|
-| `newsletters` | From/Subject probes for `newsletter`, `digest`, `unsubscribe`; narrow with bare term `newsletters` |
-| `promotions` | Probes for `promotion`, `sale`, `offer`, `discount`; narrow with bare term `promotions` |
-| `receipts` | Probes for `receipt`, `order`, `invoice`, `payment`; narrow with bare term `receipts` |
-| `notifications` | Probes for `notification`, `alert`; narrow with bare term `notifications` |
-| `old_unread` | `unread: true` + `older_than_days: 90` |
-| `large_messages` | `larger_than_kb: 1024` |
+| `newsletters` | From/Subject probes for `newsletter`, `digest`, `unsubscribe`; narrow with `category:updates` |
+| `promotions` | Probes for `promotion`, `sale`, `offer`, `discount`; narrow with `category:promotions` |
+| `receipts` | Probes for `receipt`, `order`, `invoice`, `payment`; narrow with `category:purchases` |
+| `notifications` | Probes for `notification`, `alert`; no search term (fetches everything, filters locally) |
+| `old_unread` | `unread: true` + `older_than_days: 90`; no search term (fetches everything) |
+| `large_messages` | `larger_than_kb: 1024`; no search term (fetches everything) |
 
 ## Protected and system labels (add vs. remove)
 

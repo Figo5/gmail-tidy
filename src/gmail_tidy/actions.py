@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from gmail_tidy.audit import AuditEntry, AuditLog, Candidate, RunJournal
 from gmail_tidy.checkpoint import RuleCheckpoint, ScanCheckpoint, config_fingerprint
-from gmail_tidy.config import Actions, Config, MatchConfig
+from gmail_tidy.config import PRESETS, Actions, Config, MatchConfig
 from gmail_tidy.errors import AuthError, EXIT_CANCELLED, EXIT_OK, EXIT_PARTIAL
 from gmail_tidy.gmail_client import GmailClient
 from gmail_tidy.rules import (
@@ -20,25 +20,31 @@ from gmail_tidy.rules import (
 
 
 def query_from_match(match: MatchConfig) -> str:
-    """Best-effort Gmail search narrowing (bare terms). Never the source of truth.
+    """Best-effort Gmail search narrowing. Never the source of truth.
 
     Eligibility is always re-decided locally by first_matching_rule against
-    fetched metadata; this query only narrows what gets fetched. Bare terms
-    (no operator syntax) are used deliberately so narrowing degrades safely
-    to "fetch more, filter locally" rather than depending on exact operator
+    fetched metadata; this query only narrows what gets fetched. Terms are
+    deliberately limited to From/Subject substrings (from the match's own
+    text keys) plus the preset's ``query`` (only when the preset defines one)
+    — user ``match.query`` stays ignored, so narrowing degrades safely to
+    "fetch more, filter locally" rather than depending on exact operator
     support from whatever is on the other end of GmailClient.list().
 
-    Text-probe categories narrow with their bare category term. The special
-    categories (_SPECIAL_CATEGORIES) have no meaningful Gmail search term and
-    contribute nothing: a bare "old_unread"/"large_messages" word would never
-    appear in From/Subject and would starve the scan, so those rules fetch
-    everything and filter locally in rules.matches_rule.
+    Text-probe categories narrow with ``PRESETS[category]['query']`` (Gmail
+    ``category:`` operator syntax) when the preset carries one, read from
+    config.PRESETS as the single source of truth. A preset without a ``query``
+    key (notifications, and the special categories) has no search term and
+    contributes nothing: a bare "notifications"/"old_unread"/"large_messages"
+    word would never appear in From/Subject and would starve the scan, so those
+    rules fetch everything and filter locally in rules.matches_rule.
     """
     parts: list[str] = []
     parts.extend(match.subject_contains)
     parts.extend(match.from_contains)
     if match.category and match.category not in _SPECIAL_CATEGORIES:
-        parts.append(match.category)
+        query = PRESETS.get(match.category, {}).get("query")
+        if query:
+            parts.append(query)
     return " ".join(parts)
 
 

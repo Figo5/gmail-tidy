@@ -25,7 +25,10 @@ PRESETS: dict[str, dict] = {
     "newsletters": {"query": "category:updates", "subject_contains": ["Newsletter", "Digest"]},
     "promotions": {"query": "category:promotions"},
     "receipts": {"query": "category:purchases", "subject_contains": ["Receipt", "Order", "Invoice"]},
-    "notifications": {"query": "category:notifications"},
+    # notifications has NO valid Gmail category: operator — no 'query' key, so
+    # query_from_match emits no narrowing term for it and notifications rules
+    # fetch everything, filtering locally via the _TEXT_PROBES.
+    "notifications": {},
     "old_unread": {"older_than_days": 90, "unread": True},
     "large_messages": {"larger_than_kb": 1024},
 }
