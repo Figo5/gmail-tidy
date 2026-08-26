@@ -81,10 +81,17 @@ def test_old_unread_requires_unread_and_older_than_preset():
 
 def test_old_unread_uses_presets_threshold_not_hardcoded():
     """The age threshold is the PRESETS single source of truth: with the preset
-    at 90 days, a 90-day-old unread message must NOT match (strictly older)."""
+    at 90 days, a message at the cutoff must NOT match (strictly older)."""
     cutoff = PRESETS["old_unread"]["older_than_days"]
     m = MatchConfig(category="old_unread")
-    assert not matches_rule(m, _meta(unread=True, internal_date_ms=_days_ms(cutoff)))
+    # A single captured now_ms, probed with a ±1000 ms margin either side of
+    # the exact cutoff. The production rule reads datetime.now() itself, so
+    # without the margin the test could land exactly on the boundary and flip
+    # if the clock ticked between the two independent calls.
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    boundary_ms = now_ms - cutoff * 86_400_000
+    assert not matches_rule(m, _meta(unread=True, internal_date_ms=boundary_ms + 1000))
+    assert matches_rule(m, _meta(unread=True, internal_date_ms=boundary_ms - 1000))
 
 
 def test_large_messages_uses_presets_threshold_not_hardcoded():
