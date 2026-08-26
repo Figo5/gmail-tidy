@@ -107,7 +107,9 @@ def test_scope_state_corrupt_json_returns_empty(tmp_path):
 
 
 def test_scope_state_invalid_utf8_bytes_returns_empty(tmp_path):
-    assert scope_state(_write_scope_file(tmp_path, "\xff\xfe\x00\x00")) == set()
+    tok = tmp_path / "token.json"
+    tok.write_bytes(b"\xff\xfe\x00\x00")
+    assert scope_state(tok) == set()
 
 
 def test_readonly_token_is_not_silently_reused_for_write(tmp_path):
