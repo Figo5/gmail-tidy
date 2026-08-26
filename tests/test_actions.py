@@ -806,6 +806,75 @@ def test_query_from_match_ignores_user_query_still():
     ) == ""
 
 
+# --- multi-term subject/from lists: OR semantics must not AND-narrow (Task 46)
+# rules.py matches subject_contains/from_contains with OR semantics (any()).
+# Gmail search treats space-separated terms as AND, so emitting both terms of a
+# multi-element list would starve messages matching only one of them. A
+# multi-element list therefore contributes NO fetch term (fetch more, filter
+# locally); a single-element list still narrows, and cross-key single
+# subject+from remains AND (both keys are required by the rule check).
+
+
+def test_query_from_match_multi_subject_emits_no_term():
+    """A multi-element subject_contains list (OR in rules.py) must contribute
+    no fetch term — Gmail would AND the terms and starve single-term matches."""
+    assert query_from_match(MatchConfig(subject_contains=["Newsletter", "Digest"])) == ""
+    assert query_from_match(MatchConfig(subject_contains=["a", "b", "c"])) == ""
+
+
+def test_query_from_match_multi_from_emits_no_term():
+    """A multi-element from_contains list (OR in rules.py) must contribute no
+    fetch term for the same AND-starvation reason."""
+    assert query_from_match(
+        MatchConfig(from_contains=["a@example.com", "b@example.com"])
+    ) == ""
+    assert query_from_match(
+        MatchConfig(from_contains=["x@example.com", "y@example.com", "z@example.com"])
+    ) == ""
+
+
+def test_query_from_match_single_term_still_narrows():
+    """A single-element list still contributes its term — a lone term cannot
+    AND-starve anything, so narrowing stays safe."""
+    assert query_from_match(MatchConfig(subject_contains=["newsletter"])) == "newsletter"
+    assert query_from_match(
+        MatchConfig(from_contains=["sender@example.com"])
+    ) == "sender@example.com"
+
+
+def test_query_from_match_cross_key_single_remains_and():
+    """Single subject + single from across keys remains AND: both keys are
+    required by the rule check, so both terms narrow the fetch."""
+    assert query_from_match(
+        MatchConfig(subject_contains=["news"], from_contains=["sender@example.com"])
+    ) == "news sender@example.com"
+
+
+def test_query_from_match_mixed_multi_and_single():
+    """A multi-element list in one key contributes nothing while a single
+    element in the other key still narrows."""
+    assert query_from_match(
+        MatchConfig(subject_contains=["Newsletter", "Digest"],
+                    from_contains=["sender@example.com"])
+    ) == "sender@example.com"
+    assert query_from_match(
+        MatchConfig(subject_contains=["news"],
+                    from_contains=["a@example.com", "b@example.com"])
+    ) == "news"
+
+
+def test_query_from_match_multi_list_with_category_keeps_preset_query():
+    """A multi-element text list next to a preset category still narrows with
+    the preset's operator query only — the multi list contributes nothing."""
+    assert query_from_match(
+        MatchConfig(category="newsletters", subject_contains=["Newsletter", "Digest"])
+    ) == PRESETS["newsletters"]["query"]
+    # a no-operator preset with a multi list emits nothing at all
+    assert query_from_match(
+        MatchConfig(category="notifications", subject_contains=["Newsletter", "Digest"])
+    ) == ""
+
+
 # --- offline end-to-end scans for the special categories -------------------
 
 
@@ -971,6 +1040,142 @@ def test_scan_notifications_returns_only_probe_matches_across_categories():
                                              "notif_none"}
     # the probe-matching messages were claimed, the unrelated one was not
     assert "no_probe" not in {c.message_id for c in cands}
+
+
+# --- offline end-to-end scans for multi-term subject/from lists (Task 46) ---
+# A multi-element subject_contains/from_contains list is OR in rules.py but
+# would be AND in a Gmail query, so it must contribute NO fetch term: the scan
+# fetches everything and the local rule check (any()) decides. A single-element
+# list still narrows. These scans prove the fix end-to-end: both a
+# newsletter-only and a digest-only message are returned by one rule.
+
+
+def _multi_subject_config():
+    return Config(
+        rules=[
+            Rule(id="r1", match=MatchConfig(subject_contains=["Newsletter", "Digest"]),
+                 actions=Actions(add_label=["Cleanup/N"], archive=True)),
+        ]
+    )
+
+
+def test_scan_multi_subject_returns_both_single_term_messages():
+    """End-to-end offline scan: a rule with a multi-element subject_contains
+    list must return BOTH a newsletter-only and a digest-only message — the
+    fetch must not AND-narrow to messages containing every term."""
+    api = MockGmailApi()
+    api.add_message("newsletter_only", subject="Weekly Newsletter", labels={"INBOX"})
+    api.add_message("digest_only", subject="Daily Digest", labels={"INBOX"})
+    api.add_message("both", subject="Newsletter Digest", labels={"INBOX"})
+    api.add_message("neither", subject="Totally unrelated", labels={"INBOX"})
+    cands, _cp, _stats = scan(GmailClient(api), _multi_subject_config())
+    assert {c.message_id for c in cands} == {"newsletter_only", "digest_only", "both"}
+    assert "neither" not in {c.message_id for c in cands}
+
+
+def test_scan_multi_subject_fetches_with_empty_query():
+    """The fetch query for a multi-element subject list is EMPTY (fetch
+    everything, filter locally) — never the space-joined AND form."""
+    api = MockGmailApi()
+    api.add_message("m1", subject="Weekly Newsletter", labels={"INBOX"})
+    client, seen = _spy_list_page(GmailClient(api))
+    scan(client, _multi_subject_config())
+    assert "" in seen  # the rule was fetched with the empty query
+    assert "Newsletter Digest" not in seen  # the AND form is never emitted
+
+
+def _multi_from_config():
+    return Config(
+        rules=[
+            Rule(id="r1", match=MatchConfig(from_contains=["a@example.com", "b@example.com"]),
+                 actions=Actions(add_label=["Cleanup/F"], archive=True)),
+        ]
+    )
+
+
+def test_scan_multi_from_returns_both_single_term_messages():
+    """End-to-end offline scan: a rule with a multi-element from_contains list
+    must return messages from EITHER sender — OR semantics preserved."""
+    api = MockGmailApi()
+    api.add_message("from_a", from_hdr="a@example.com", labels={"INBOX"})
+    api.add_message("from_b", from_hdr="b@example.com", labels={"INBOX"})
+    api.add_message("from_c", from_hdr="c@example.com", labels={"INBOX"})
+    cands, _cp, _stats = scan(GmailClient(api), _multi_from_config())
+    assert {c.message_id for c in cands} == {"from_a", "from_b"}
+    assert "from_c" not in {c.message_id for c in cands}
+
+
+def test_scan_multi_from_fetches_with_empty_query():
+    """The fetch query for a multi-element from list is EMPTY — never the
+    space-joined AND form that would starve single-sender messages."""
+    api = MockGmailApi()
+    api.add_message("m1", from_hdr="a@example.com", labels={"INBOX"})
+    client, seen = _spy_list_page(GmailClient(api))
+    scan(client, _multi_from_config())
+    assert "" in seen
+    assert "a@example.com b@example.com" not in seen
+
+
+def test_scan_single_term_still_narrows_fetch():
+    """A single-element list still narrows the fetch: a message that does not
+    contain the lone term is never even fetched."""
+    api = MockGmailApi()
+    api.add_message("match", subject="newsletter", labels={"INBOX"})
+    api.add_message("other", subject="receipt", labels={"INBOX"})
+    client, seen = _spy_list_page(GmailClient(api))
+    cands, _cp, _stats = scan(client, _config())  # single subject_contains
+    assert [c.message_id for c in cands] == ["match"]
+    assert set(seen) == {"newsletter"}  # narrowed fetch, not empty
+
+
+def test_scan_mixed_multi_and_single_keeps_single_narrowing():
+    """A multi-element list in one key fetches everything while a single
+    element in the other key still narrows — both behaviors compose."""
+    cfg = Config(
+        rules=[
+            Rule(id="r1",
+                 match=MatchConfig(subject_contains=["Newsletter", "Digest"],
+                                   from_contains=["sender@example.com"]),
+                 actions=Actions(add_label=["Cleanup/N"], archive=True)),
+        ]
+    )
+    api = MockGmailApi()
+    api.add_message("news_from_sender", subject="Weekly Newsletter",
+                    from_hdr="sender@example.com", labels={"INBOX"})
+    api.add_message("digest_from_sender", subject="Daily Digest",
+                    from_hdr="sender@example.com", labels={"INBOX"})
+    api.add_message("news_other_sender", subject="Weekly Newsletter",
+                    from_hdr="other@example.com", labels={"INBOX"})
+    client, seen = _spy_list_page(GmailClient(api))
+    cands, _cp, _stats = scan(client, cfg)
+    # only the sender-narrowed messages are candidates; the multi subject list
+    # did not AND-narrow them away
+    assert {c.message_id for c in cands} == {"news_from_sender", "digest_from_sender"}
+    assert set(seen) == {"sender@example.com"}  # single term narrows, multi list does not
+
+
+def test_scan_multi_subject_with_category_keeps_preset_narrowing():
+    """A multi-element subject list next to a preset category still narrows the
+    fetch with the preset's operator query only — the multi list contributes
+    nothing, so both single-term messages in the category are returned."""
+    cfg = Config(
+        rules=[
+            Rule(id="r1", match=MatchConfig(category="newsletters",
+                                            subject_contains=["Newsletter", "Digest"]),
+                 actions=Actions(add_label=["Cleanup/N"], archive=True)),
+        ]
+    )
+    api = MockGmailApi()
+    api.add_message("news_cat", category="updates", subject="Weekly Newsletter",
+                    labels={"INBOX"})
+    api.add_message("digest_cat", category="updates", subject="Daily Digest",
+                    labels={"INBOX"})
+    api.add_message("news_other_cat", category="forums", subject="Weekly Newsletter",
+                    labels={"INBOX"})
+    client, seen = _spy_list_page(GmailClient(api))
+    cands, _cp, _stats = scan(client, cfg)
+    assert {c.message_id for c in cands} == {"news_cat", "digest_cat"}
+    assert set(seen) == {PRESETS["newsletters"]["query"]}  # category:updates only
 
 
 # --- overlapping rule queries: seen-dedup must follow the claim (Task 43) --

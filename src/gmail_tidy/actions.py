@@ -37,10 +37,21 @@ def query_from_match(match: MatchConfig) -> str:
     contributes nothing: a bare "notifications"/"old_unread"/"large_messages"
     word would never appear in From/Subject and would starve the scan, so those
     rules fetch everything and filter locally in rules.matches_rule.
+
+    A ``subject_contains``/``from_contains`` list contributes a fetch term only
+    when it has exactly ONE element. rules.matches_rule treats these lists as
+    OR (any element suffices), but Gmail search treats space-separated terms as
+    AND — emitting every element of a multi-element list would narrow the fetch
+    to messages containing ALL of them and starve messages matching only one.
+    A multi-element list therefore contributes nothing (fetch more, filter
+    locally); a single-element list still narrows, and a single subject + single
+    from across keys remains AND because the rule check requires both keys.
     """
     parts: list[str] = []
-    parts.extend(match.subject_contains)
-    parts.extend(match.from_contains)
+    if len(match.subject_contains) == 1:
+        parts.append(match.subject_contains[0])
+    if len(match.from_contains) == 1:
+        parts.append(match.from_contains[0])
     if match.category and match.category not in _SPECIAL_CATEGORIES:
         query = PRESETS.get(match.category, {}).get("query")
         if query:

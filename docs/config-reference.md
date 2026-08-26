@@ -54,8 +54,11 @@ terms from `from_contains`, `subject_contains`, and the preset's `query`
 table below); eligibility is always re-decided locally from fetched metadata.
 A preset without a `query` (notifications and the special presets) contributes
 no narrowing term, so rules built on it fetch everything and filter locally.
-The `query` key on the rule itself is accepted but ignored — see the `match`
-table below.
+A `from_contains`/`subject_contains` list contributes a fetch term only when it
+has exactly one element: the list is OR in the rule check, but Gmail search
+treats space-separated terms as AND, so a multi-element list contributes no
+fetch term and its rules fetch more and filter locally. The `query` key on the
+rule itself is accepted but ignored — see the `match` table below.
 
 | Key | Type | Meaning |
 |---|---|---|
