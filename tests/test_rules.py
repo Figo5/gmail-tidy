@@ -1,6 +1,6 @@
 # tests/test_rules.py
 from datetime import datetime, timezone
-from gmail_tidy.config import CATEGORIES, MatchConfig, Actions, Rule, Config
+from gmail_tidy.config import CATEGORIES, PRESETS, MatchConfig, Actions, Rule, Config
 from gmail_tidy.rules import _TEXT_PROBES, MessageMeta, matches_rule, is_excluded, is_included, first_matching_rule
 
 
@@ -58,6 +58,49 @@ def test_special_categories_handled_without_text_probes():
     assert not matches_rule(MatchConfig(category="old_unread"), _meta(unread=False))
     assert matches_rule(MatchConfig(category="large_messages"), _meta(size_kb=2048.0))
     assert not matches_rule(MatchConfig(category="large_messages"), _meta(size_kb=10.0))
+
+
+# --- special-category presets use PRESETS as single source of truth ---------
+
+
+def _days_ms(days: int) -> int:
+    return int(datetime.now(timezone.utc).timestamp() * 1000) - days * 86_400_000
+
+
+def test_old_unread_requires_unread_and_older_than_preset():
+    """old_unread must require BOTH unread AND older than the PRESETS value —
+    a recent unread message or an old read message does not match."""
+    m = MatchConfig(category="old_unread")
+    cutoff = PRESETS["old_unread"]["older_than_days"]
+    assert matches_rule(m, _meta(unread=True, internal_date_ms=_days_ms(cutoff + 1)))
+    # recent unread: fails the age leg
+    assert not matches_rule(m, _meta(unread=True, internal_date_ms=_days_ms(cutoff - 1)))
+    # old but read: fails the unread leg
+    assert not matches_rule(m, _meta(unread=False, internal_date_ms=_days_ms(cutoff + 1)))
+
+
+def test_old_unread_uses_presets_threshold_not_hardcoded():
+    """The age threshold is the PRESETS single source of truth: with the preset
+    at 90 days, a 90-day-old unread message must NOT match (strictly older)."""
+    cutoff = PRESETS["old_unread"]["older_than_days"]
+    m = MatchConfig(category="old_unread")
+    assert not matches_rule(m, _meta(unread=True, internal_date_ms=_days_ms(cutoff)))
+
+
+def test_large_messages_uses_presets_threshold_not_hardcoded():
+    """large_messages must read the threshold from PRESETS, not a hardcoded
+    1024 — so a message at exactly the preset threshold matches."""
+    cutoff = PRESETS["large_messages"]["larger_than_kb"]
+    m = MatchConfig(category="large_messages")
+    assert matches_rule(m, _meta(size_kb=float(cutoff)))
+    assert not matches_rule(m, _meta(size_kb=float(cutoff) - 1.0))
+
+
+def test_special_categories_have_presets_metadata():
+    """Both special categories carry their governing value in PRESETS so the
+    single-source-of-truth chain exists end to end."""
+    assert PRESETS["old_unread"]["older_than_days"] > 0
+    assert PRESETS["large_messages"]["larger_than_kb"] > 0
 
 
 def test_every_category_has_matching_behavior():

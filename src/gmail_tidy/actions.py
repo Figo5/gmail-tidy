@@ -10,7 +10,13 @@ from gmail_tidy.checkpoint import RuleCheckpoint, ScanCheckpoint, config_fingerp
 from gmail_tidy.config import Actions, Config, MatchConfig
 from gmail_tidy.errors import AuthError, EXIT_CANCELLED, EXIT_OK, EXIT_PARTIAL
 from gmail_tidy.gmail_client import GmailClient
-from gmail_tidy.rules import MessageMeta, first_matching_rule, is_excluded, is_included
+from gmail_tidy.rules import (
+    MessageMeta,
+    _SPECIAL_CATEGORIES,
+    first_matching_rule,
+    is_excluded,
+    is_included,
+)
 
 
 def query_from_match(match: MatchConfig) -> str:
@@ -21,11 +27,17 @@ def query_from_match(match: MatchConfig) -> str:
     (no operator syntax) are used deliberately so narrowing degrades safely
     to "fetch more, filter locally" rather than depending on exact operator
     support from whatever is on the other end of GmailClient.list().
+
+    Text-probe categories narrow with their bare category term. The special
+    categories (_SPECIAL_CATEGORIES) have no meaningful Gmail search term and
+    contribute nothing: a bare "old_unread"/"large_messages" word would never
+    appear in From/Subject and would starve the scan, so those rules fetch
+    everything and filter locally in rules.matches_rule.
     """
     parts: list[str] = []
     parts.extend(match.subject_contains)
     parts.extend(match.from_contains)
-    if match.category:
+    if match.category and match.category not in _SPECIAL_CATEGORIES:
         parts.append(match.category)
     return " ".join(parts)
 

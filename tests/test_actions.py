@@ -1,8 +1,9 @@
 # tests/test_actions.py
+from datetime import datetime, timezone
 from pathlib import Path
 import pytest
 from gmail_tidy.config import Config, Rule, MatchConfig, Actions
-from gmail_tidy.actions import scan, apply_run, ScanStats
+from gmail_tidy.actions import scan, apply_run, ScanStats, query_from_match
 from gmail_tidy.audit import RunJournal, AuditLog, Candidate
 from gmail_tidy.checkpoint import (
     RuleCheckpoint,
@@ -719,3 +720,104 @@ def test_generic_exception_still_recorded_and_loop_continues(tmp_path):
     assert "Cleanup/N" in api.label_names_of("m1")
     assert len(j.failures(run_id)) == 1
     assert j.failures(run_id)[0].startswith("m2: ")
+
+
+# --- special-category preset query narrowing (Task 42) ----------------------
+# old_unread and large_messages have NO meaningful Gmail search term, so
+# query_from_match must emit nothing for them — otherwise a pure special-category
+# rule would fetch nothing (the bare term "old_unread" never appears in From or
+# Subject) and the scan would starve. Text-probe categories keep their bare term.
+
+
+def test_query_from_match_special_category_emits_no_term():
+    assert query_from_match(MatchConfig(category="old_unread")) == ""
+    assert query_from_match(MatchConfig(category="large_messages")) == ""
+
+
+def test_query_from_match_special_category_keeps_other_parts():
+    """A mixed rule narrows on its text parts only; the special category itself
+    contributes no term."""
+    assert query_from_match(
+        MatchConfig(category="old_unread", subject_contains=["news"])
+    ) == "news"
+    assert query_from_match(
+        MatchConfig(category="large_messages", from_contains=["sender@example.com"])
+    ) == "sender@example.com"
+
+
+def test_query_from_match_text_probe_categories_unchanged():
+    """Text-probe categories still narrow with their bare category term."""
+    for cat in ("newsletters", "promotions", "receipts", "notifications"):
+        assert query_from_match(MatchConfig(category=cat)) == cat
+
+
+# --- offline end-to-end scans for the special categories -------------------
+
+
+def _old_unread_config():
+    return Config(
+        rules=[
+            Rule(id="old", match=MatchConfig(category="old_unread"),
+                 actions=Actions(add_label=["Cleanup/Old"], archive=True)),
+        ]
+    )
+
+
+def _large_config():
+    return Config(
+        rules=[
+            Rule(id="big", match=MatchConfig(category="large_messages"),
+                 actions=Actions(add_label=["Cleanup/Big"], archive=True)),
+        ]
+    )
+
+
+def _days_ago_ms(age_days: int) -> int:
+    return int(datetime.now(timezone.utc).timestamp() * 1000) - age_days * 86_400_000
+
+
+def test_scan_old_unread_returns_old_unread_only():
+    """End-to-end offline scan: a pure old_unread rule must fetch with an EMPTY
+    query and locally return ONLY messages that are old AND unread."""
+    from gmail_tidy.config import PRESETS
+    days = PRESETS["old_unread"]["older_than_days"]
+    api = MockGmailApi()
+    api.add_message("old_unread", labels={"INBOX"}, unread=True,
+                    internal_date_ms=_days_ago_ms(days + 30))
+    api.add_message("recent_unread", labels={"INBOX"}, unread=True,
+                    internal_date_ms=_days_ago_ms(1))
+    api.add_message("old_read", labels={"INBOX"}, unread=False,
+                    internal_date_ms=_days_ago_ms(days + 30))
+    api.add_message("other", labels={"INBOX"}, unread=False,
+                    internal_date_ms=_days_ago_ms(1))
+    client = GmailClient(api)
+    cands, _cp, _stats = scan(client, _old_unread_config())
+    assert [c.message_id for c in cands] == ["old_unread"]
+
+
+def test_scan_large_messages_returns_large_only():
+    """End-to-end offline scan: a pure large_messages rule must fetch with an
+    EMPTY query and return only messages at/above the PRESETS size threshold."""
+    from gmail_tidy.config import PRESETS
+    kb = PRESETS["large_messages"]["larger_than_kb"]
+    api = MockGmailApi()
+    api.add_message("big", labels={"INBOX"}, size_kb=float(kb) + 500.0)
+    api.add_message("at_threshold", labels={"INBOX"}, size_kb=float(kb))
+    api.add_message("small", labels={"INBOX"}, size_kb=float(kb) - 1.0)
+    cands, _cp, _stats = scan(GmailClient(api), _large_config())
+    assert [c.message_id for c in cands] == ["big", "at_threshold"]
+
+
+def test_scan_special_category_rule_fetches_with_empty_query():
+    """A pure special-category rule must drive list_page with an EMPTY query
+    (fetch everything, filter locally) — never a bare 'old_unread'/'large_messages'
+    term that would match nothing in the mock's From/Subject haystack."""
+    from gmail_tidy.config import PRESETS
+    days = PRESETS["old_unread"]["older_than_days"]
+    api = MockGmailApi()
+    api.add_message("old_unread", labels={"INBOX"}, unread=True,
+                    internal_date_ms=_days_ago_ms(days + 30))
+    client, seen = _spy_list_page(GmailClient(api))
+    scan(client, _old_unread_config())
+    assert "" in seen  # the rule was fetched with the empty query
+    assert "old_unread" not in seen  # the bare term is never emitted

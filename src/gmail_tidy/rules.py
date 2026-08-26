@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from gmail_tidy.config import CATEGORIES, Config, MatchConfig, Rule
+from gmail_tidy.config import CATEGORIES, PRESETS, Config, MatchConfig, Rule
 
 PROTECTED_AT_RUNTIME = frozenset(
     {"IMPORTANT", "STARRED", "SPAM", "TRASH", "DRAFT", "SENT", "CHAT"}
@@ -58,9 +58,11 @@ def _days_ago_ms(days: int) -> int:
 
 def _category_hits(category: str, meta: MessageMeta) -> bool:
     if category == "old_unread":
-        return meta.unread
+        return meta.unread and meta.internal_date_ms < _days_ago_ms(
+            PRESETS["old_unread"]["older_than_days"]
+        )
     if category == "large_messages":
-        return meta.size_kb >= 1024
+        return meta.size_kb >= PRESETS["large_messages"]["larger_than_kb"]
     text = f"{meta.from_header or ''} {meta.subject_header or ''}".lower()
     probes = _TEXT_PROBES.get(category, [])
     return any(p in text for p in probes)
