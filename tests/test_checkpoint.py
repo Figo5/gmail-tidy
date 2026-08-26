@@ -268,3 +268,20 @@ def test_load_mixed_valid_and_bad_rule_entries_keeps_valid(tmp_path):
     assert sorted(cp.rules) == ["r1"]
     assert cp.rules["r1"].page_token == "tok-1"
     assert cp.rules["r1"].exhausted is True
+
+
+# --- invalid UTF-8 bytes (Task 40) -------------------------------------------
+# A checkpoint.json containing bytes that do not decode as UTF-8 (e.g. a
+# partial write from a crash, or hand-corruption) must degrade exactly like a
+# missing/corrupt file: a fresh checkpoint, never a raw UnicodeDecodeError
+# leaking through scan/run/summary. Valid files keep their behavior.
+
+
+def test_load_invalid_utf8_bytes_returns_fresh(tmp_path):
+    """Invalid UTF-8 bytes in checkpoint.json are treated like a corrupt file."""
+    cfg = _config()
+    path = tmp_path / "checkpoint.json"
+    path.write_bytes(b"\xff\xfe\x00\x00")
+    cp = load_checkpoint(path, cfg)
+    assert cp.config_fingerprint == config_fingerprint(cfg)
+    assert cp.rules == {}

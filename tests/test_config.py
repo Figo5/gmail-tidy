@@ -236,3 +236,20 @@ def test_rules_list_entry_error_tagged_with_rule_id(tmp_path):
     msg = str(exc.value)
     assert "r1" in msg
     assert "rules.0.match" in msg
+
+
+# --- invalid UTF-8 bytes (Task 40) -------------------------------------------
+# A config.yaml containing bytes that do not decode as UTF-8 must raise a
+# clean ConfigError (the same contract as unreadable/malformed-YAML files) —
+# never a raw UnicodeDecodeError leaking through init/scan/run/apply/status.
+
+
+def test_load_config_invalid_utf8_raises_clean_config_error(tmp_path):
+    """Invalid UTF-8 bytes in config.yaml raise a clean ConfigError."""
+    p = tmp_path / "config.yaml"
+    p.write_bytes(b"\xff\xfe\x00\x00")
+    with pytest.raises(ConfigError) as exc:
+        load_config(p)
+    msg = str(exc.value)
+    assert "cannot read config" in msg
+    assert "Traceback" not in msg

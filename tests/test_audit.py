@@ -86,6 +86,16 @@ def test_failures_partial_objects_skipped(tmp_path):
     assert j.failures(run_id) == ["m2: gone", "m3: gone"]
 
 
+def test_failures_invalid_utf8_returns_empty(tmp_path):
+    """Invalid UTF-8 bytes in a .failures.jsonl degrade to [] — the same as a
+    missing file — so summary/apply/run never crash on an undecodable file."""
+    j = RunJournal(tmp_path / "runs")
+    run_id = j.init_run()
+    path = tmp_path / "runs" / f"{run_id}.failures.jsonl"
+    path.write_bytes(b"\xff\xfe\x00\x00")
+    assert j.failures(run_id) == []
+
+
 def test_save_load_stats_roundtrip_and_missing(tmp_path):
     j = RunJournal(tmp_path / "runs")
     run_id = j.init_run()

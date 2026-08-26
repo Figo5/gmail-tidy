@@ -198,21 +198,27 @@ class RunJournal:
         if not path.exists():
             return []
         out: list[str] = []
-        with open(path, encoding="utf-8") as fh:
-            for line in fh:
-                if not line.strip():
-                    continue
-                try:
-                    rec = json.loads(line)
-                except (ValueError, TypeError):  # JSONDecodeError and malformed input
-                    continue
-                if not isinstance(rec, dict):
-                    continue
-                mid = rec.get("message_id")
-                err = rec.get("err")
-                if not isinstance(mid, str) or not isinstance(err, str):
-                    continue
-                out.append(f"{mid}: {err}")
+        try:
+            with open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except (ValueError, TypeError):  # JSONDecodeError and malformed input
+                        continue
+                    if not isinstance(rec, dict):
+                        continue
+                    mid = rec.get("message_id")
+                    err = rec.get("err")
+                    if not isinstance(mid, str) or not isinstance(err, str):
+                        continue
+                    out.append(f"{mid}: {err}")
+        except UnicodeError:
+            # A file whose bytes do not decode as UTF-8 is corrupt: degrade
+            # exactly like a missing file ([]) rather than crashing summary/
+            # apply/run with a raw UnicodeDecodeError.
+            return []
         return out
 
     def list_runs(self) -> list[str]:

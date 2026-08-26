@@ -2031,3 +2031,146 @@ def test_run_wrong_shape_token_clean_exit_4(tmp_path, monkeypatch):
                             AssertionError("build_service must not be reached")))
     result = runner.invoke(app, ["run", "--dry-run"])
     _assert_clean_auth_exit_for_wrong_shape_token(result)
+
+
+# --- invalid UTF-8 bytes (Task 40) --------------------------------------------
+# Local state files that contain bytes which do not decode as UTF-8 (e.g. a
+# truncated write, or hand-corruption) must degrade exactly like missing or
+# malformed files across every user-facing command — never a raw
+# UnicodeDecodeError traceback through a command boundary.
+
+
+def _write_invalid_utf8(tmp_path, name: str) -> None:
+    (tmp_path / name).write_bytes(b"\xff\xfe\x00\x00")
+
+
+def test_scan_invalid_utf8_checkpoint_degrades_clean(tmp_path, monkeypatch):
+    """scan with an undecodable checkpoint.json: fresh start, exit 0, no crash,
+    and the checkpoint is persisted back in valid shape."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter", labels={"INBOX"})
+    _mock_net(monkeypatch, api)
+    _write_invalid_utf8(tmp_path, "checkpoint.json")
+    result = runner.invoke(app, ["scan"])
+    assert result.exit_code == 0
+    _assert_no_traceback(result)
+    assert "scan complete" in result.output
+    data = json.loads((tmp_path / "checkpoint.json").read_text(encoding="utf-8"))
+    assert isinstance(data["rules"], dict)
+
+
+def test_run_with_invalid_utf8_checkpoint_degrades_clean(tmp_path, monkeypatch):
+    """run --dry-run with an undecodable checkpoint: fresh start, exit 0."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    (tmp_path / "token.json").write_text(
+        json.dumps({
+            "token": "fake-token", "refresh_token": "fake-refresh",
+            "client_id": "x", "client_secret": "x",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "scopes": ["https://www.googleapis.com/auth/gmail.modify",
+                       "https://www.googleapis.com/auth/gmail.labels"],
+        }),
+        encoding="utf-8",
+    )
+    api = MockGmailApi()
+    api.add_message("m1", subject="newsletter", labels={"INBOX"})
+    monkeypatch.setattr(cli, "build_service", lambda creds: api)
+    _write_invalid_utf8(tmp_path, "checkpoint.json")
+    result = runner.invoke(app, ["run", "--dry-run"])
+    assert result.exit_code == 0
+    _assert_no_traceback(result)
+    assert "dry-run complete" in result.output
+
+
+def test_summary_with_invalid_utf8_checkpoint_prints_no_checkpoint(tmp_path, monkeypatch):
+    """summary with an undecodable checkpoint: 'no checkpoint yet', exit 0."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _save_run_with_stats(
+        tmp_path,
+        [Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                   actions=Actions(add_label=["Cleanup/A"], archive=True), in_inbox=True)],
+        stats={"evaluated": 1, "excluded": 0, "noop": 0, "candidates": 1},
+    )
+    _write_invalid_utf8(tmp_path, "checkpoint.json")
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    assert result.exit_code == 0
+    _assert_no_traceback(result)
+    assert "no checkpoint yet" in result.output
+
+
+def test_summary_with_invalid_utf8_failures_degrades_gracefully(tmp_path, monkeypatch):
+    """summary with an undecodable .failures.jsonl: 'none', exit 0, no crash."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    run_id = _save_run_with_stats(
+        tmp_path,
+        [Candidate(message_id="m1", thread_id="t1", rule_id="r1",
+                   actions=Actions(add_label=["Cleanup"], archive=True), in_inbox=True)],
+        stats={"evaluated": 1, "excluded": 0, "noop": 0, "candidates": 1},
+    )
+    (tmp_path / "runs" / f"{run_id}.failures.jsonl").write_bytes(b"\xff\xfe\x00\x00")
+    result = runner.invoke(app, ["summary", "--run", run_id])
+    assert result.exit_code == 0
+    _assert_no_traceback(result)
+    assert "Failures:" in result.output
+    assert "none" in result.output.lower()
+
+
+def test_status_with_invalid_utf8_token_clean_output(tmp_path, monkeypatch):
+    """status with an undecodable token.json: exit 0, `(none)` scopes."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    _write_invalid_utf8(tmp_path, "token.json")
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0
+    assert "(none)" in result.output
+    _assert_no_traceback(result)
+
+
+def test_auth_status_with_invalid_utf8_token_clean_output(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    _write_invalid_utf8(tmp_path, "token.json")
+    result = runner.invoke(app, ["auth", "status"])
+    assert result.exit_code == 0
+    assert "(none)" in result.output
+    _assert_no_traceback(result)
+
+
+def test_scan_with_invalid_utf8_token_clean_auth_exit_4(tmp_path, monkeypatch):
+    """scan with an undecodable token: scope gate sees no scopes -> clean
+    AuthError (exit 4), no traceback, unusable token discarded."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    _write_invalid_utf8(tmp_path, "token.json")
+    monkeypatch.setattr(cli, "build_service",
+                        lambda creds: (_ for _ in ()).throw(
+                            AssertionError("build_service must not be reached")))
+    result = runner.invoke(app, ["scan"])
+    _assert_clean_auth_exit_for_wrong_shape_token(result)
+    assert not (tmp_path / "token.json").exists()
+
+
+def test_run_with_invalid_utf8_token_clean_exit_4(tmp_path, monkeypatch):
+    """run (headless) with an undecodable token: scope gate -> exit 4 before
+    any service, no traceback."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(_config_text(), encoding="utf-8")
+    _write_invalid_utf8(tmp_path, "token.json")
+    monkeypatch.setattr(cli, "build_service",
+                        lambda creds: (_ for _ in ()).throw(
+                            AssertionError("build_service must not be reached")))
+    result = runner.invoke(app, ["run", "--dry-run"])
+    _assert_clean_auth_exit_for_wrong_shape_token(result)
+
+
+def test_scan_with_invalid_utf8_config_exits_2_no_traceback(tmp_path, monkeypatch):
+    """scan with an undecodable config.yaml: clean ConfigError (exit 2)."""
+    monkeypatch.setenv("GMAIL_TIDY_CONFIG", str(tmp_path))
+    _write_invalid_utf8(tmp_path, "config.yaml")
+    result = runner.invoke(app, ["scan"])
+    assert result.exit_code == 2
+    assert isinstance(result.exception, SystemExit)
+    assert result.exception.code == 2
+    _assert_no_traceback(result)
+    assert "cannot read config" in result.output

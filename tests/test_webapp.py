@@ -321,6 +321,83 @@ def test_checkpoint_missing_or_corrupt_degrades(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Invalid UTF-8 bytes (Task 40)
+# ---------------------------------------------------------------------------
+
+
+def test_checkpoint_invalid_utf8_degrades_empty_200(tmp_path):
+    """Invalid UTF-8 bytes in checkpoint.json: empty projection, 200 — never a
+    500 from a raw UnicodeDecodeError escaping _checkpoint_projection."""
+    (tmp_path / "checkpoint.json").write_bytes(b"\xff\xfe\x00\x00")
+    response = web.handle("GET", "/api/v1/checkpoint", tmp_path)
+    assert response.status == 200
+    assert _body(response) == {"fingerprint": None, "rules": {}}
+
+
+def test_audit_invalid_utf8_degrades_empty_200(tmp_path):
+    """Invalid UTF-8 bytes in audit.jsonl: empty entries, 200 — never a 500."""
+    (tmp_path / "audit.jsonl").write_bytes(b"\xff\xfe\x00\x00")
+    response = web.handle("GET", "/api/v1/audit", tmp_path)
+    assert response.status == 200
+    assert _body(response) == {"entries": []}
+
+
+def test_audit_summary_invalid_utf8_degrades_empty_200(tmp_path):
+    (tmp_path / "audit.jsonl").write_bytes(b"\xff\xfe\x00\x00")
+    response = web.handle("GET", "/api/v1/audit/summary", tmp_path)
+    assert response.status == 200
+    assert _body(response) == {"by_rule": {}, "by_action": {}, "by_kind": {}}
+
+
+def test_status_invalid_utf8_config_and_token_200(tmp_path):
+    """Invalid UTF-8 config.yaml/token.json degrade to config_valid false and
+    scopes [] respectively — the status route stays 200, never a 500."""
+    (tmp_path / "config.yaml").write_bytes(b"\xff\xfe\x00\x00")
+    (tmp_path / "token.json").write_bytes(b"\xff\xfe\x00\x00")
+    response = web.handle("GET", "/api/v1/status", tmp_path)
+    assert response.status == 200
+    body = _body(response)
+    assert body["config_present"] is True
+    assert body["config_valid"] is False
+    assert body["token_present"] is True
+    assert body["scopes"] == []
+
+
+def test_config_404_on_invalid_utf8(tmp_path):
+    """An undecodable config.yaml must 404 /api/v1/config (invalid config is
+    'not found' for the viewer), never 500."""
+    (tmp_path / "config.yaml").write_bytes(b"\xff\xfe\x00\x00")
+    response = web.handle("GET", "/api/v1/config", tmp_path)
+    assert response.status == 404
+
+
+def test_valid_checkpoint_file_regression_after_hardening(tmp_path):
+    """A well-formed checkpoint.json keeps projecting fingerprint + rule status —
+    the invalid-UTF-8 hardening must not reject valid data."""
+    (tmp_path / "checkpoint.json").write_text(
+        json.dumps({"config_fingerprint": "abc", "rules": {"r1": {"page_token": None, "exhausted": True}}}),
+        encoding="utf-8",
+    )
+    response = web.handle("GET", "/api/v1/checkpoint", tmp_path)
+    assert response.status == 200
+    assert _body(response) == {"fingerprint": "abc", "rules": {"r1": "exhausted"}}
+
+
+def test_valid_audit_regression_after_hardening(tmp_path):
+    """A well-formed audit.jsonl keeps serving its entries after the
+    invalid-UTF-8 hardening."""
+    (tmp_path / "audit.jsonl").write_text(
+        json.dumps({"run_id": "r", "message_id": "m1", "thread_id": "t1",
+                    "rule_id": "rule1", "action": "add_label", "payload": "Cleanup/A",
+                    "kind": "apply", "ts": 1.0}) + "\n",
+        encoding="utf-8",
+    )
+    response = web.handle("GET", "/api/v1/audit", tmp_path)
+    assert response.status == 200
+    assert len(_body(response)["entries"]) == 1
+
+
+# ---------------------------------------------------------------------------
 # Privacy / secret exclusion
 # ---------------------------------------------------------------------------
 

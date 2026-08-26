@@ -171,8 +171,14 @@ def _read_audit_entries(cfg_dir: Path) -> list[dict]:
     path = cfg_dir / "audit.jsonl"
     if not path.exists():
         return []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except UnicodeError:
+        # Bytes that do not decode as UTF-8 are corrupt: degrade like a missing
+        # file (empty entries) rather than 500-ing the endpoint.
+        return []
     entries: list[dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in lines:
         if not line.strip():
             continue
         try:
@@ -228,7 +234,7 @@ def _checkpoint_projection(cfg_dir: Path) -> dict:
                 rules[str(rid)] = (
                     "exhausted" if r.get("exhausted") else "in-progress"
                 )
-        except (OSError, json.JSONDecodeError, AttributeError):
+        except (OSError, json.JSONDecodeError, UnicodeError, AttributeError):
             fp, rules = None, {}
     return {"fingerprint": fp, "rules": rules}
 

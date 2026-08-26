@@ -45,7 +45,7 @@ def scope_state(token: Path) -> set[str]:
         return set()
     try:
         data = json.loads(token.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, UnicodeError):
         return set()
     if not isinstance(data, dict):
         return set()  # wrong shape; treat like missing/corrupt

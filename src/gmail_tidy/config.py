@@ -176,7 +176,7 @@ def _format_errors(exc: ValidationError, raw: object) -> str:
 def load_config(path: Path) -> Config:
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
+    except (OSError, yaml.YAMLError, UnicodeError) as exc:
         raise ConfigError(f"cannot read config {path}: {exc}") from exc
     if raw is None:
         raw = {}

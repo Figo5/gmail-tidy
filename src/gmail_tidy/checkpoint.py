@@ -61,7 +61,7 @@ def load_checkpoint(path: Path, config: Config) -> ScanCheckpoint:
         return ScanCheckpoint(config_fingerprint=fp)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, UnicodeError):
         return ScanCheckpoint(config_fingerprint=fp)
     if not isinstance(data, dict):
         return ScanCheckpoint(config_fingerprint=fp)  # wrong shape; start fresh

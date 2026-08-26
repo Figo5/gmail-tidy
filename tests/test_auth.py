@@ -99,6 +99,17 @@ def test_scope_state_corrupt_json_returns_empty(tmp_path):
     assert scope_state(_write_scope_file(tmp_path, "{ not json")) == set()
 
 
+# --- invalid UTF-8 bytes (Task 40) -------------------------------------------
+# A token.json containing bytes that do not decode as UTF-8 (e.g. a truncated
+# write, or a file half-overwritten by another program) must degrade exactly
+# like a missing/corrupt file: an empty set — never a raw UnicodeDecodeError
+# leaking through status/auth status/the headless write-scope gate.
+
+
+def test_scope_state_invalid_utf8_bytes_returns_empty(tmp_path):
+    assert scope_state(_write_scope_file(tmp_path, "\xff\xfe\x00\x00")) == set()
+
+
 def test_readonly_token_is_not_silently_reused_for_write(tmp_path):
     """A read-only token must never be returned for a require_write=True call.
 
