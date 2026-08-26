@@ -448,6 +448,159 @@ def test_valid_audit_regression_after_hardening(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Audit entry type validation (Task 47)
+#
+# _read_audit_entries must mirror AuditLog.entries' type validation without
+# touching AuditLog (whose __init__ performs a write) and without any write of
+# its own: non-dict records, missing/non-string required fields, wrong-typed
+# optional fields (payload/kind/ts), and ts bool are shape errors -> skipped;
+# an integral ts is normalized to float; unknown extra keys are dropped (only
+# the known fields are passed through); valid records keep their file order.
+# ---------------------------------------------------------------------------
+
+
+def _audit_line(overrides=None):
+    """A well-formed audit record as one JSONL line, with optional overrides."""
+    rec = {
+        "run_id": "r", "message_id": "m1", "thread_id": "t1", "rule_id": "rule1",
+        "action": "add_label", "payload": "Cleanup/A", "kind": "apply", "ts": 1720000000.0,
+    }
+    if overrides:
+        rec.update(overrides)
+    return json.dumps(rec)
+
+
+@pytest.mark.parametrize("field", ["run_id", "message_id", "thread_id", "rule_id", "action"])
+def test_audit_required_field_wrong_type_skipped(tmp_path, field):
+    """A required field that is present but NOT a string is a shape error: the
+    record is skipped, never projected with an unvalidated value. AuditEntry is
+    an unvalidated dataclass, so the pre-Task-47 reader let e.g. run_id=42 flow
+    straight through into the response."""
+    (tmp_path / "audit.jsonl").write_text(
+        _audit_line({field: 42}) + "\n", encoding="utf-8")
+    assert _body(web.handle("GET", "/api/v1/audit", tmp_path)) == {"entries": []}
+    assert _body(web.handle("GET", "/api/v1/audit/summary", tmp_path)) == {
+        "by_rule": {}, "by_action": {}, "by_kind": {}}
+
+
+@pytest.mark.parametrize("field", ["run_id", "message_id", "thread_id", "rule_id", "action"])
+def test_audit_missing_required_field_skipped(tmp_path, field):
+    """A required field that is absent is a shape error: skipped."""
+    rec = {
+        "run_id": "r", "message_id": "m1", "thread_id": "t1", "rule_id": "rule1",
+        "action": "add_label",
+    }
+    rec.pop(field)
+    (tmp_path / "audit.jsonl").write_text(json.dumps(rec) + "\n", encoding="utf-8")
+    resp = web.handle("GET", "/api/v1/audit", tmp_path)
+    assert resp.status == 200
+    assert _body(resp) == {"entries": []}
+
+
+def test_audit_payload_non_string_non_none_skipped(tmp_path):
+    """payload must be a string or None — anything else is a shape error."""
+    (tmp_path / "audit.jsonl").write_text(
+        _audit_line({"payload": 123}) + "\n", encoding="utf-8")
+    assert _body(web.handle("GET", "/api/v1/audit", tmp_path)) == {"entries": []}
+
+
+def test_audit_kind_non_string_skipped(tmp_path):
+    (tmp_path / "audit.jsonl").write_text(
+        _audit_line({"kind": ["apply"]}) + "\n", encoding="utf-8")
+    assert _body(web.handle("GET", "/api/v1/audit", tmp_path)) == {"entries": []}
+
+
+@pytest.mark.parametrize("bad_ts", ["1720000000", None, [1.0]])
+def test_audit_ts_non_numeric_skipped(tmp_path, bad_ts):
+    """ts must be numeric; a string/None/list is a shape error."""
+    (tmp_path / "audit.jsonl").write_text(
+        _audit_line({"ts": bad_ts}) + "\n", encoding="utf-8")
+    assert _body(web.handle("GET", "/api/v1/audit", tmp_path)) == {"entries": []}
+
+
+def test_audit_ts_bool_skipped(tmp_path):
+    """bool is an int subclass but not a timestamp — skipped explicitly."""
+    (tmp_path / "audit.jsonl").write_text(
+        _audit_line({"ts": True}) + "\n", encoding="utf-8")
+    assert _body(web.handle("GET", "/api/v1/audit", tmp_path)) == {"entries": []}
+
+
+def test_audit_ts_int_normalized_to_float(tmp_path):
+    """An integral ts is stored as float, mirroring AuditLog.entries' float(ts)."""
+    (tmp_path / "audit.jsonl").write_text(
+        _audit_line({"ts": 1720000000}) + "\n", encoding="utf-8")
+    entries = _body(web.handle("GET", "/api/v1/audit", tmp_path))["entries"]
+    assert len(entries) == 1
+    assert entries[0]["ts"] == 1720000000.0
+    assert type(entries[0]["ts"]) is float
+
+
+def test_audit_extra_keys_dropped_record_preserved(tmp_path):
+    """Unknown keys are not part of the pinned schema: they must be dropped
+    (only the known fields are passed to AuditEntry), not reject the whole
+    record — and never leak into the response."""
+    (tmp_path / "audit.jsonl").write_text(
+        _audit_line({"subject": "spam", "content": "secret"}) + "\n",
+        encoding="utf-8")
+    resp = web.handle("GET", "/api/v1/audit", tmp_path)
+    assert resp.status == 200
+    entries = _body(resp)["entries"]
+    assert len(entries) == 1
+    assert set(entries[0]) == {"run_id", "message_id", "thread_id", "rule_id",
+                               "action", "payload", "kind", "ts"}
+    lowered = json.dumps(entries)
+    assert "subject" not in lowered
+    assert "secret" not in lowered
+
+
+def test_audit_interleaving_preserves_valid_order(tmp_path):
+    """Valid records keep their file order around records that are skipped as
+    shape errors (corrupt JSON, non-dict, wrong-typed fields, bool ts)."""
+    good = _audit_line({"run_id": "r1"})
+    bad_ts = _audit_line({"ts": True})
+    good_mid = _audit_line({"run_id": "r2"})
+    (tmp_path / "audit.jsonl").write_text(
+        good + "\n" + "not-json\n" + bad_ts + "\n" + good_mid + "\n"
+        + "[1,2,3]\n" + "null\n", encoding="utf-8")
+    entries = _body(web.handle("GET", "/api/v1/audit", tmp_path))["entries"]
+    assert [e["run_id"] for e in entries] == ["r1", "r2"]
+    summary = _body(web.handle("GET", "/api/v1/audit/summary", tmp_path))
+    assert summary == {"by_rule": {"rule1": 2},
+                       "by_action": {"add_label": 2},
+                       "by_kind": {"apply": 2}}
+
+
+def test_audit_summary_string_keys_after_type_validation(tmp_path):
+    """Records with non-string rule_id/action/kind must not pollute the summary
+    with coerced keys — only real string keys appear."""
+    (tmp_path / "audit.jsonl").write_text(
+        _audit_line({"run_id": 123, "action": 7, "kind": 99}) + "\n"
+        + _audit_line() + "\n", encoding="utf-8")
+    summary = _body(web.handle("GET", "/api/v1/audit/summary", tmp_path))
+    assert summary == {"by_rule": {"rule1": 1},
+                       "by_action": {"add_label": 1},
+                       "by_kind": {"apply": 1}}
+    assert all(isinstance(k, str) for k in summary["by_rule"])
+    assert all(isinstance(k, str) for k in summary["by_action"])
+    assert all(isinstance(k, str) for k in summary["by_kind"])
+    assert "123" not in json.dumps(summary)
+
+
+def test_audit_valid_record_unchanged_after_type_validation(tmp_path):
+    """A fully valid record projects exactly as before the Task 47 hardening —
+    same values, same pinned field set, same response schema."""
+    (tmp_path / "audit.jsonl").write_text(
+        _audit_line() + "\n", encoding="utf-8")
+    resp = web.handle("GET", "/api/v1/audit", tmp_path)
+    assert resp.status == 200
+    assert _body(resp) == {"entries": [json.loads(_audit_line())]}
+    summary = _body(web.handle("GET", "/api/v1/audit/summary", tmp_path))
+    assert summary == {"by_rule": {"rule1": 1},
+                       "by_action": {"add_label": 1},
+                       "by_kind": {"apply": 1}}
+
+
+# ---------------------------------------------------------------------------
 # Privacy / secret exclusion
 # ---------------------------------------------------------------------------
 

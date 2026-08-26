@@ -171,6 +171,15 @@ def _read_audit_entries(cfg_dir: Path) -> list[dict]:
     AuditLog.__init__ calls path.touch() (a write), which the web layer must
     never do; reading the allowlisted file ourselves is a pure read and keeps
     the exact on-disk schema pinned by tests/test_webapp_contract.py.
+
+    The per-record validation mirrors AuditLog.entries exactly (without calling
+    it): a record that is not an object, that has a missing or non-string
+    required field (run_id/message_id/thread_id/rule_id/action), or whose
+    optional fields (payload/kind/ts) are wrong-typed is a shape error and is
+    skipped; bool is not a timestamp; an integral ts is normalized to float.
+    Only the known fields are ever passed to AuditEntry, so unknown extra keys
+    are dropped rather than leaking into the response. Valid records are
+    projected in file order.
     """
     path = cfg_dir / "audit.jsonl"
     if not path.exists():
@@ -186,9 +195,43 @@ def _read_audit_entries(cfg_dir: Path) -> list[dict]:
         if not line.strip():
             continue
         try:
-            entries.append(asdict(AuditEntry(**json.loads(line))))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue  # defensive: never let a corrupt line break the endpoint
+            rec = json.loads(line)
+        except (ValueError, TypeError):  # JSONDecodeError and malformed input
+            continue
+        if not isinstance(rec, dict):
+            # A record that is not an object (list/string/scalar) is a shape
+            # error, not data.
+            continue
+        if not all(isinstance(rec.get(k), str)
+                   for k in ("run_id", "message_id", "thread_id",
+                             "rule_id", "action")):
+            # Missing or non-string required fields are a shape error —
+            # AuditEntry would raise TypeError or flow garbage through
+            # unvalidated fields.
+            continue
+        # Optional fields (payload/kind/ts have dataclass defaults): preserved
+        # when present and well-typed, defaulted when absent.
+        entry_kwargs = {
+            "run_id": rec["run_id"], "message_id": rec["message_id"],
+            "thread_id": rec["thread_id"], "rule_id": rec["rule_id"],
+            "action": rec["action"],
+        }
+        if "payload" in rec:
+            payload = rec["payload"]
+            if not isinstance(payload, (str, type(None))):
+                continue
+            entry_kwargs["payload"] = payload
+        if "kind" in rec:
+            if not isinstance(rec["kind"], str):
+                continue
+            entry_kwargs["kind"] = rec["kind"]
+        if "ts" in rec:
+            ts = rec["ts"]
+            if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+                # bool is not a timestamp.
+                continue
+            entry_kwargs["ts"] = float(ts)
+        entries.append(asdict(AuditEntry(**entry_kwargs)))
     return entries
 
 
