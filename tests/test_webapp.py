@@ -238,6 +238,56 @@ def test_run_detail_unknown_run(tmp_path):
     assert resp.status == 404
 
 
+# ---------------------------------------------------------------------------
+# Corrupt run detail files (Task 45)
+# ---------------------------------------------------------------------------
+
+
+def test_run_detail_malformed_json_404_not_500(tmp_path):
+    """A run file that is not valid JSON must 404 the run, never a 500 from a
+    raw JSONDecodeError escaping _run_projection."""
+    info = _populate(tmp_path)
+    (tmp_path / "runs" / f"{info['run_id']}.json").write_text(
+        "{not-json", encoding="utf-8")
+    resp = web.handle("GET", f"/api/v1/runs/{info['run_id']}", tmp_path)
+    assert resp.status == 404
+
+
+def test_run_detail_wrong_shape_404_not_500(tmp_path):
+    """A valid-JSON run file with the wrong shape (records must be objects)
+    must 404 the run, never a 500."""
+    info = _populate(tmp_path)
+    (tmp_path / "runs" / f"{info['run_id']}.json").write_text(
+        json.dumps([1, 2, 3]), encoding="utf-8")
+    resp = web.handle("GET", f"/api/v1/runs/{info['run_id']}", tmp_path)
+    assert resp.status == 404
+
+
+def test_run_detail_invalid_utf8_404_not_500(tmp_path):
+    """Invalid UTF-8 bytes in a run file must 404 the run, never a 500 from a
+    raw UnicodeDecodeError escaping from _run_projection."""
+    info = _populate(tmp_path)
+    (tmp_path / "runs" / f"{info['run_id']}.json").write_bytes(b"\xff\xfe\x00\x00")
+    resp = web.handle("GET", f"/api/v1/runs/{info['run_id']}", tmp_path)
+    assert resp.status == 404
+
+
+def test_run_detail_valid_regression_after_corruption_hardening(tmp_path):
+    """A well-formed run file keeps serving its detail after the corruption
+    hardening — valid runs must not be rejected."""
+    info = _populate(tmp_path)
+    resp = web.handle("GET", f"/api/v1/runs/{info['run_id']}", tmp_path)
+    assert resp.status == 200
+    assert _body(resp)["run"] == info["run_id"]
+
+
+def test_run_detail_missing_regression_after_corruption_hardening(tmp_path):
+    """A missing run file still 404s after the corruption hardening."""
+    _populate(tmp_path)
+    resp = web.handle("GET", "/api/v1/runs/deadbeef1234", tmp_path)
+    assert resp.status == 404
+
+
 def test_audit_projection_and_limit(tmp_path):
     info = _populate(tmp_path)
     resp = web.handle("GET", "/api/v1/audit", tmp_path)

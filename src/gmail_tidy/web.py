@@ -151,7 +151,11 @@ def _run_projection(cfg_dir: Path, run_id: str) -> dict:
     journal = RunJournal(cfg_dir / "runs")
     try:
         candidates = journal.load_candidates(run_id)
-    except FileNotFoundError:
+    except (ConfigError, FileNotFoundError):
+        # A run file that is missing (FileNotFoundError) or corrupt
+        # (ConfigError from RunJournal.load_candidates — malformed JSON, a
+        # valid-JSON wrong shape, or invalid UTF-8) is "not found" for the
+        # viewer: 404 alongside the missing-file case, never a 500.
         raise _RouteError("not found")
     stats = journal.load_stats(run_id)
     return {
