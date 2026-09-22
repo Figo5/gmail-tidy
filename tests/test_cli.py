@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from rich.text import Text
 from typer.testing import CliRunner
 
 from gmail_tidy import cli
@@ -789,7 +790,10 @@ def test_module_main_runs_help_offline():
         capture_output=True, text=True, env=env, timeout=60,
     )
     assert result.returncode == 0
-    assert "python -m gmail_tidy" in (result.stdout + result.stderr)
+    # Rich may style separate parts of the invocation on CI. Assert the visible
+    # command, while retaining the subprocess success check above.
+    output = Text.from_ansi(result.stdout + result.stderr).plain
+    assert "python -m gmail_tidy" in output
 
 
 # --- summary ---------------------------------------------------------------
