@@ -17,13 +17,23 @@ surface is blocked by a precise AST-level test, not just convention.
 > found"). Install from a local clone of this repository as described in
 > [Install](#install).
 
+## A typical session
+
+After installing and completing the one-time OAuth/rule setup below:
+
+```sh
+gmail-tidy scan --limit 200   # read Gmail metadata; build a local plan
+gmail-tidy preview           # inspect the plan without mailbox writes
+gmail-tidy apply             # re-check and ask before changing labels
+```
+
 ## Why
 
 Most mail-cleanup tools either only apply filters to *future* mail, or are
-delete-first utilities. gmail-tidy combines three things no v1 competitor does:
+delete-first utilities. gmail-tidy combines:
 
-1. **Declarative rules over existing mail** — `scan` builds a local plan, `apply` is
-   the only command that writes.
+1. **Declarative rules over existing mail** — `scan` builds a local plan and writes
+   require an explicit apply, scheduled run, or undo action.
 2. **Zero destructive actions** — the only write is `users.messages.batchModify`
    (label add/remove, ≤ 1000 ids/batch).
 3. **Global include/exclude guardrails** — protected labels and excluded senders are
@@ -35,6 +45,20 @@ gmail-tidy is installed **from source** (a local clone of this repository) — i
 not on PyPI. Requires Python **3.11+**. The package uses `google-auth-oauthlib` +
 `google-api-python-client` for OAuth2, `typer`/`rich` for the CLI, and
 `pydantic`/`PyYAML` for config validation.
+
+### macOS / Linux
+
+```sh
+git clone https://github.com/Figo5/gmail-tidy.git
+cd gmail-tidy
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+gmail-tidy --help
+```
+
+Source-only distribution was rechecked on 2026-09-22: the PyPI project endpoint
+returned 404. Nothing is published to PyPI by this installation process.
 
 ### Windows (PowerShell)
 
@@ -206,8 +230,9 @@ write commands.
 
 ## Safety model
 
-- **Plan vs. play:** `scan`/`preview` never write. `apply` is the only write command
-  and re-checks `exclude` against live state immediately before each batch.
+- **Plan vs. apply:** `scan`/`preview` never write to Gmail. `apply`, scheduled
+  `run`, and explicitly applied `undo` are write paths. Apply re-checks `exclude`
+  against live state immediately before each batch.
 - **No destructive surface:** delete / trash / spam-report / send / import are absent
   from the code and enforced by an AST test over `src/`, plus a mock that exposes only
   the allowed Gmail surface.
@@ -365,5 +390,13 @@ and never calls Gmail. A future `--live` harness against the real Gmail API (und
 `tests/live/`) is **planned but not implemented**. Always run the offline suite
 before committing:
 
-- `python -m pytest -q` — all green
+- `python -m pytest -q` — run the offline suite
 - `git ls-files | grep -Ei '(^|/)(token|client_secret).*\.json$'` — no output
+
+
+Local validation on 2026-09-22: **654 tests passed** on Python 3.11. The CI
+badge above reports the current GitHub Actions status separately from local validation.
+
+## License
+
+[MIT](LICENSE).
