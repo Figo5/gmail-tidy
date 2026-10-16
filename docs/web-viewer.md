@@ -6,7 +6,7 @@ state, and a config projection — it never contacts Gmail, never holds OAuth
 credentials, and never writes anything. Data stays on this machine.
 
 The viewer is the v2 carve-out documented in
-[docs/superpowers/specs/2026-08-22-gmail-tidy-web-app-design.md](superpowers/specs/2026-08-22-gmail-tidy-web-app-design.md).
+[docs/specs/2026-08-22-gmail-tidy-web-app-design.md](specs/2026-08-22-gmail-tidy-web-app-design.md).
 
 ## Launch
 

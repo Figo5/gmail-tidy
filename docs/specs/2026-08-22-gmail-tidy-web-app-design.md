@@ -30,7 +30,7 @@ contacts Gmail, never holds OAuth credentials, and never writes anything.
 Two prior documents are deliberately **not edited**; this design instead
 acknowledges and narrows them:
 
-1. **v1 spec non-goal.** `docs/superpowers/specs/2026-08-19-gmail-tidy-design.md`
+1. **v1 spec non-goal.** `docs/specs/2026-08-19-gmail-tidy-design.md`
    §2 lists, for v1: *"No delete/trash/spam/unsubscribe/send. No IMAP. No web
    UI. No scheduler/daemon. …"*. This v2 design is an **additive carve-out**:
    the phrase "No web UI" remains the v1 truth and is **retained for any
@@ -40,7 +40,7 @@ acknowledges and narrows them:
    does not rewrite v1. A future multi-user, TLS-terminated, or non-loopback
    UI would be a separate v3 proposal and remains excluded by v1.
 
-2. **Plan numbering collision.** `docs/superpowers/plans/2026-08-19-gmail-tidy.md`
+2. **Plan numbering collision.** the original plan
    already numbers a v1 task **"Task 7: Scan and apply (planning +
    reconcile-before-apply)"**. The v2 web-viewer work has colloquially been
    called "Task 7", which collides with the completed v1 Task 7. The v1 plan is

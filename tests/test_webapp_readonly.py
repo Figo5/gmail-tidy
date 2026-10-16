@@ -1,7 +1,7 @@
 # tests/test_webapp_readonly.py
 """Read-only filesystem invariant tests for the pure web.handle() seam (Task 24).
 
-The v2 web design (docs/superpowers/specs/2026-08-22-gmail-tidy-web-app-design.md,
+The v2 web design (docs/specs/2026-08-22-gmail-tidy-web-app-design.md,
 §5 "Read-only") declares: no handler opens a file for writing; no handler calls
 a gmail_tidy function with write side effects. This file proves that invariant
 observationally through the pure request seam ``web.handle(method, path,

@@ -1,7 +1,7 @@
 """Loopback-only, read-only web viewer over gmail-tidy's local state (Task 8).
 
 This module is the implementation seam declared by the v2 design spec
-``docs/superpowers/specs/2026-08-22-gmail-tidy-web-app-design.md``. It serves a
+``docs/specs/2026-08-22-gmail-tidy-web-app-design.md``. It serves a
 single-user browser view of data that already lives on disk:
 
 - stdlib only (``http.server``, ``urllib.parse``, ``json``, ``webbrowser``);

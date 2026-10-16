@@ -1,6 +1,6 @@
 """Structure tests pinning the web-app design doc to the ACTUAL code contracts.
 
-The v2 web viewer design (docs/superpowers/specs/2026-08-22-gmail-tidy-web-app-design.md)
+The v2 web viewer design (docs/specs/2026-08-22-gmail-tidy-web-app-design.md)
 promises a loopback-only read-only viewer over data that already lives on
 disk. These tests lock the design's data surface to reality so the design
 cannot silently drift from the code a future web layer will consume:
@@ -31,7 +31,7 @@ from gmail_tidy.render import candidate_record
 
 SPEC_PATH = (
     Path(__file__).resolve().parent.parent
-    / "docs" / "superpowers" / "specs"
+    / "docs" / "specs"
     / "2026-08-22-gmail-tidy-web-app-design.md"
 )
 
