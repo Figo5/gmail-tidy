@@ -283,7 +283,7 @@ The implementer of the web viewer shall:
 7. Do not edit this design's §1–§4 boundaries without a new spec section.
 8. `docs/autonomous-progress.md` is updated by the project's own conventions;
    **this task did not modify it**, and neither should Task 8 treat it as a
-   staging area for `.claude` artifacts.
+   staging area for local tooling artifacts.
 
 ## 14. Change log
 
